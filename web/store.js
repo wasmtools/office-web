@@ -95,6 +95,28 @@
             return openDb().then(function (db) {
                 return reqToPromise(tx(db, 'readwrite').delete(id));
             });
+        },
+
+        /** Rename a file (metadata only; content is untouched). */
+        rename: function (id, name, ext) {
+            return openDb().then(function (db) {
+                return reqToPromise(tx(db, 'readonly').get(id)).then(function (rec) {
+                    if (!rec) throw new Error('File not found');
+                    rec.name = name;
+                    if (ext) rec.ext = ext.toLowerCase();
+                    rec.updatedAt = Date.now();
+                    return reqToPromise(tx(db, 'readwrite').put(rec)).then(function () {
+                        return rec;
+                    });
+                });
+            });
+        },
+
+        /** Delete all files. */
+        clear: function () {
+            return openDb().then(function (db) {
+                return reqToPromise(tx(db, 'readwrite').clear());
+            });
         }
     };
 

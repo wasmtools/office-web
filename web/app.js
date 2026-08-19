@@ -366,8 +366,14 @@
     // ---------- file library UI ----------
     function refreshLibrary() {
         var listEl = document.getElementById('file-list');
+        var toolbarEl = document.getElementById('library-toolbar');
         if (!listEl || !window.FileStore) return;
         window.FileStore.list().then(function (files) {
+            if (toolbarEl) {
+                toolbarEl.style.display = files.length ? 'flex' : 'none';
+                var countEl = toolbarEl.querySelector('.library-count');
+                if (countEl) countEl.textContent = files.length + (files.length === 1 ? ' file' : ' files');
+            }
             listEl.innerHTML = '';
             if (!files.length) {
                 listEl.innerHTML = '<div class="empty-hint">No files yet. Open or create one.</div>';
@@ -382,11 +388,21 @@
                     '<span class="file-icon">' + icon + '</span>' +
                     '<span class="file-name"></span>' +
                     '<span class="file-meta">' + formatSize(f.size) + ' · ' + formatDate(f.updatedAt) + '</span>' +
-                    '<button class="file-del" title="Delete">×</button>';
+                    '<button class="file-act file-rename" title="Rename">✏️</button>' +
+                    '<button class="file-act file-download" title="Download">⬇</button>' +
+                    '<button class="file-act file-del" title="Delete">×</button>';
                 item.querySelector('.file-name').textContent = f.name;
                 item.addEventListener('click', function (ev) {
-                    if (ev.target.classList.contains('file-del')) return;
+                    if (ev.target.closest('.file-act')) return;
                     loadFromFileStore(f.id);
+                });
+                item.querySelector('.file-rename').addEventListener('click', function (ev) {
+                    ev.stopPropagation();
+                    renameFile(f);
+                });
+                item.querySelector('.file-download').addEventListener('click', function (ev) {
+                    ev.stopPropagation();
+                    downloadFile(f.id);
                 });
                 item.querySelector('.file-del').addEventListener('click', function (ev) {
                     ev.stopPropagation();
@@ -396,6 +412,51 @@
                 });
                 listEl.appendChild(item);
             });
+        });
+    }
+
+    function renameFile(f) {
+        var input = prompt('Rename file:', f.name);
+        if (input === null) return;
+        input = input.trim();
+        if (!input) { setStatus('Name cannot be empty', true); setTimeout(function () { setStatus(''); }, 3000); return; }
+        if (input === f.name) return;
+        // Keep the original extension: if the user typed a new one, accept it
+        // only when it matches this editor's writable formats; otherwise the
+        // old extension is re-appended.
+        var dot = input.lastIndexOf('.');
+        var base = dot > 0 ? input.slice(0, dot) : input;
+        var ext = dot > 0 ? input.slice(dot + 1).toLowerCase() : f.ext;
+        var writable = { docx: 1, xlsx: 1, pptx: 1, doc: 1, xls: 1, ppt: 1, odt: 1, ods: 1, odp: 1, csv: 1, rtf: 1, txt: 1 };
+        if (!writable[ext]) ext = f.ext;
+        window.FileStore.rename(f.id, base + '.' + ext, ext).then(function () {
+            setStatus('Renamed to ' + base + '.' + ext);
+            setTimeout(function () { setStatus(''); }, 3000);
+            refreshLibrary();
+        }).catch(function (e) {
+            setStatus('Rename failed: ' + (e && e.message || e), true);
+        });
+    }
+
+    function downloadFile(id) {
+        setStatus('Preparing download …');
+        window.FileStore.get(id).then(function (rec) {
+            if (!rec) throw new Error('File not found');
+            triggerDownload(new Uint8Array(rec.data), rec.name);
+            setStatus('');
+        }).catch(function (e) {
+            setStatus('Download failed: ' + (e && e.message || e), true);
+        });
+    }
+
+    function clearLibrary() {
+        if (!confirm('Delete ALL files from the library? This cannot be undone.')) return;
+        window.FileStore.clear().then(function () {
+            setStatus('All files deleted');
+            setTimeout(function () { setStatus(''); }, 3000);
+            refreshLibrary();
+        }).catch(function (e) {
+            setStatus('Failed: ' + (e && e.message || e), true);
         });
     }
     function formatSize(n) {
@@ -534,6 +595,10 @@
         if (backHomeBtn) backHomeBtn.addEventListener('click', backToHome);
         var saveBtn = document.getElementById('save-btn');
         if (saveBtn) saveBtn.addEventListener('click', function () { saveDocument(); });
+
+        // library toolbar
+        var clearAllBtn = document.getElementById('clear-all-btn');
+        if (clearAllBtn) clearAllBtn.addEventListener('click', clearLibrary);
 
         // per-type "New" buttons (data-new="docx|xlsx|pptx")
         var newActions = document.getElementById('new-actions');
