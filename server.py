@@ -133,6 +133,7 @@ class StaticHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         if encoding:
             self.send_header('Content-Encoding', encoding)
+            self.send_header('Vary', 'Accept-Encoding')
         self.send_header('Cache-Control', cache_policy(path))
         self.end_headers()
         self.wfile.write(body)
@@ -159,6 +160,7 @@ class StaticHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Type', self.guess_type(path))
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Content-Encoding', 'gzip')
+        self.send_header('Vary', 'Accept-Encoding')
         self.send_header('Cache-Control', cache_policy(path))
         self.end_headers()
         self.wfile.write(body)
