@@ -36,7 +36,9 @@
 if (Common === undefined)
     var Common = {};
 
-define([], function () {
+define([
+    'common/main/lib/component/BaseView'
+], function () {
     'use strict';
 
     Common.UI.MonacoEditor = Common.UI.BaseView.extend({

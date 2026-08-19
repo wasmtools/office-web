@@ -43,7 +43,9 @@
 if (Common === undefined)
     var Common = {};
 
-define([], function () { 'use strict';
+define([
+    'common/main/lib/component/Window'
+], function () { 'use strict';
 
     var _BulletTypes = {};
     _BulletTypes.none = -1;

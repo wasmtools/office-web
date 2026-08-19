@@ -38,7 +38,9 @@
  *  Created on 15.10.2020
  *
  */
-define([], function () { 'use strict';
+define([
+    'common/main/lib/component/Window'
+], function () { 'use strict';
 
     Common.Views.OptionsDialog = Common.UI.Window.extend(_.extend({
         options: {

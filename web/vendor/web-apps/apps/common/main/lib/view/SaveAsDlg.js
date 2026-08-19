@@ -36,7 +36,9 @@
  *  Created on 9/27/18
  */
 
-define([], function () { 'use strict';
+define([
+    'common/main/lib/component/Window'
+], function () { 'use strict';
 
     Common.Views.SaveAsDlg = Common.UI.Window.extend(_.extend({
         initialize : function(options) {

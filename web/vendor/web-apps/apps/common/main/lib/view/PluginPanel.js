@@ -41,7 +41,9 @@ if (Common === undefined)
 
 Common.Views = Common.Views || {};
 
-define([], function () {
+define([
+    'common/main/lib/component/BaseView'
+], function () {
     'use strict';
 
     Common.Views.PluginPanel = Common.UI.BaseView.extend(_.extend({

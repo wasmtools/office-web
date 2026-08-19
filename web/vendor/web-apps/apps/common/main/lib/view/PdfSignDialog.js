@@ -40,7 +40,9 @@
  */
 
 
-define([], function () { 'use strict';
+define([
+    'common/main/lib/component/Window'
+], function () { 'use strict';
     Common.Views.PdfSignDialog = Common.UI.Window.extend(_.extend({
         options: {
             width: 535,

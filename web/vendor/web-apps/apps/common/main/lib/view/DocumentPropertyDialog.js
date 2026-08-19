@@ -33,7 +33,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-define([], function () { 'use strict';
+define([
+    'common/main/lib/component/Window'
+], function () { 'use strict';
 
     Common.Views.DocumentPropertyDialog = Common.UI.Window.extend(_.extend({
         options: {

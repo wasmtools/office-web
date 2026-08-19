@@ -42,7 +42,9 @@
 if (Common === undefined)
     var Common = {};
 
-define([], function () { 'use strict';
+define([
+    'common/main/lib/component/Window'
+], function () { 'use strict';
 
     Common.Views.InsertTableDialog = Common.UI.Window.extend(_.extend({
         options: {
