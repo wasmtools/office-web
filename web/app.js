@@ -1,0 +1,636 @@
+/*
+ * app.js — standalone in-browser office editor.
+ *
+ * Opens, edits and saves Office documents entirely client-side using the
+ * self-compiled x2t.wasm converter. No Document Server is required.
+ *
+ *   open : file bytes -> x2t (docx|xlsx|pptx -> bin) -> editor.openDocument({buffer})
+ *   save : editor bin -> x2t (bin -> docx|xlsx|pptx) -> download / IndexedDB
+ *   pdf  : raw PDF bytes -> editor.openDocument (view + annotate)
+ *
+ * Files are persisted in IndexedDB (see store.js) so they survive reloads.
+ */
+(function () {
+    'use strict';
+
+    var BUILD_VERSION = '1.0.0';
+    window.__OO_BUILD_VERSION = BUILD_VERSION;
+
+    // ---------- config from URL ----------
+    var PARAMS = {};
+    new URLSearchParams(window.location.search).forEach(function (v, k) { PARAMS[k] = v; });
+
+    // Determine the entry type. Priority: explicit global (?set by an embedder),
+    // ?type= param, then the page filename (docx.html -> 'docx', etc.).
+    function typeFromPath() {
+        var m = /\/(docx|xlsx|pptx|pdf)\.html$/.exec(window.location.pathname);
+        return m ? m[1] : '';
+    }
+    var PAGE_TYPE = window.__OO_PAGE_TYPE || PARAMS.type || typeFromPath();
+
+    var statusEl = document.getElementById('status');
+    function setStatus(msg, isError) {
+        if (!statusEl) return;
+        if (!msg) { statusEl.textContent = ''; statusEl.classList.remove('show'); return; }
+        statusEl.textContent = msg;
+        statusEl.classList.add('show');
+        statusEl.classList.toggle('error', !!isError);
+    }
+
+    // ---------- x2t.wasm conversion ----------
+    function fsWriteFile(mod, path, bytes) {
+        var stream = mod.FS.open(path, 'w');
+        mod.FS.write(stream, bytes, 0, bytes.length, 0);
+        mod.FS.close(stream);
+    }
+
+    function resetWorking(mod) {
+        try {
+            var rmrf = function (p) {
+                var st;
+                try { st = mod.FS.stat(p); } catch (_) { return; }
+                if (mod.FS.isDir(st.mode)) {
+                    mod.FS.readdir(p).forEach(function (e) {
+                        if (e === '.' || e === '..') return;
+                        rmrf(p + '/' + e);
+                    });
+                    mod.FS.rmdir(p);
+                } else {
+                    mod.FS.unlink(p);
+                }
+            };
+            rmrf('/working');
+        } catch (_) {}
+        mod.FS.mkdir('/working');
+        mod.FS.mkdir('/working/fonts');
+        mod.FS.mkdir('/working/themes');
+    }
+
+    function x2tConvert(mod, inputBytes, fromExt, toExt, workName) {
+        resetWorking(mod);
+        var inName = workName + '.' + fromExt;
+        var outName = workName + '.' + toExt;
+        fsWriteFile(mod, '/working/' + inName, inputBytes);
+        var xml = '<?xml version="1.0" encoding="utf-8"?>' +
+            '<TaskQueueDataConvert xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">' +
+            '<m_sFontDir>/working/fonts/</m_sFontDir>' +
+            '<m_sThemeDir>/working/themes</m_sThemeDir>' +
+            '<m_sFileFrom>/working/' + inName + '</m_sFileFrom>' +
+            '<m_sFileTo>/working/' + outName + '</m_sFileTo>' +
+            '<m_bIsNoBase64>true</m_bIsNoBase64>' +
+            '<m_nCsvTxtEncoding>46</m_nCsvTxtEncoding>' +
+            '<m_nCsvDelimiter>4</m_nCsvDelimiter>' +
+            '</TaskQueueDataConvert>';
+        mod.FS.writeFile('/working/params.xml', xml);
+        var ret = mod.ccall('main1', 'number', ['string'], ['/working/params.xml']);
+        if (ret !== 0) throw new Error('x2t conversion failed ret=' + ret);
+        return mod.FS.readFile('/working/' + outName);
+    }
+
+    // ---------- document type helpers ----------
+    var CELL_EXTS = ['xls', 'xlsx', 'xlsm', 'ods', 'csv'];
+    var SLIDE_EXTS = ['ppt', 'pptx', 'odp', 'ppsx'];
+    var PDF_EXTS = ['pdf'];
+
+    function detectDocumentType(ext) {
+        ext = (ext || '').toLowerCase();
+        if (CELL_EXTS.indexOf(ext) >= 0) return 'cell';
+        if (SLIDE_EXTS.indexOf(ext) >= 0) return 'slide';
+        if (PDF_EXTS.indexOf(ext) >= 0) return 'pdf';
+        return 'word';
+    }
+
+    // bin header -> writable formats (measured against the compiled x2t)
+    function detectBinType(bin) {
+        if (!bin || bin.length < 4) return null;
+        var head = String.fromCharCode(bin[0], bin[1], bin[2], bin[3]);
+        if (head === 'DOCY') return ['docx', 'odt', 'rtf', 'txt'];
+        if (head === 'XLSY') return ['xlsx', 'xls', 'ods'];
+        if (head === 'PPTY') return ['pptx', 'odp'];
+        return null;
+    }
+    var LEGACY_TO_NEW = { doc: 'docx', ppt: 'pptx', csv: 'xlsx' };
+
+    // ---------- editor state ----------
+    var docEditor = null;
+    var pendingBin = null;
+    var documentReady = false;
+    var emptyDocGotReal = false;
+    var currentFile = null;   // { id, name, ext }
+
+    function waitDocumentRendered(docType) {
+        var waited = 0;
+        var timer = setInterval(function () {
+            waited += 300;
+            var ready = false;
+            try {
+                var frame = document.querySelector('iframe[name="frameEditor"]');
+                var w = frame && frame.contentWindow;
+                var ed = w && w.Asc && w.Asc.editor;
+                if (!ed) return;
+                if (docType === 'cell') {
+                    var wb = ed.wbModel;
+                    ready = !!(wb && wb.getWorksheetCount && wb.getWorksheetCount() > 0);
+                } else if (docType === 'slide') {
+                    var ldS = ed.WordControl && ed.WordControl.m_oLogicDocument;
+                    ready = !!(ldS && ldS.Slides && ldS.Slides.length > 0);
+                } else {
+                    var ld = ed.WordControl && ed.WordControl.m_oLogicDocument;
+                    ready = !!(ld && ld.Pages && ld.Pages.length > 0);
+                }
+            } catch (e) { /* iframe not ready */ }
+            if (ready) {
+                clearInterval(timer);
+                documentReady = true;
+                setStatus('');
+            } else if (waited > 60000) {
+                clearInterval(timer);
+                setStatus('Document render timeout. Please reload.', true);
+            }
+        }, 300);
+    }
+
+    function createEditor(fileExt, title) {
+        var docType = detectDocumentType(fileExt);
+        docEditor = new DocsAPI.DocEditor('editor', {
+            type: 'desktop',
+            width: '100%',
+            height: '100%',
+            documentType: docType,
+            document: {
+                fileType: fileExt,
+                key: 'doc-' + Date.now(),
+                title: title,
+                url: '_offline_',
+                permissions: { edit: true, download: true, print: true, copy: true }
+            },
+            editorConfig: {
+                mode: 'edit',
+                lang: 'en',
+                canCoAuthoring: false,
+                user: { id: 'local-user', name: 'Local User' },
+                customization: { about: false, feedback: false, autosave: false }
+            },
+            events: {
+                onAppReady: function () {},
+                onDocumentReady: function () {
+                    if (pendingBin && !emptyDocGotReal) {
+                        var bin = pendingBin;
+                        pendingBin = null;
+                        setStatus('Loading document …');
+                        var buf = bin.slice();
+                        docEditor.openDocument({ buffer: buf.buffer });
+                    }
+                },
+                onError: function (e) { setStatus('Editor error: ' + JSON.stringify(e && e.data), true); },
+                onDownloadAs: function () {},
+                onRequestClose: function () { window.close(); },
+                onRequestSave: function () { saveDocument(); }
+            }
+        });
+    }
+
+    // ---------- open a file ----------
+    function openFile(file) {
+        // file: { id?, name, ext, data: Uint8Array }
+        currentFile = { id: file.id || null, name: file.name, ext: (file.ext || '').toLowerCase() };
+        var ext = currentFile.ext;
+        document.title = currentFile.name;
+        window.__ooDocExt = ext;
+        hideHome();
+
+        window.__x2tReadyPromise.then(function (mod) {
+            if (ext === 'pdf') {
+                // PDF: open raw bytes directly (no x2t bin conversion)
+                setStatus('Starting editor …');
+                // PDF: raw bytes go through the same bridge as the bin path;
+                // the pdfeditor shim's getEmpty returns them (raw PDF, not DOCY).
+                pendingBin = file.data;
+                window.__ooPendingDocBin = file.data;
+                createEditor(ext, currentFile.name);
+                waitForEditorApi(function (ed) {
+                    if (!emptyDocGotReal && ed.asc_openDocumentFromBytes) {
+                        ed.asc_openDocumentFromBytes(file.data);
+                    }
+                    setStatus('');
+                });
+                return;
+            }
+            setStatus('Converting document …');
+            var bin = x2tConvert(mod, file.data, ext, 'bin', 'open');
+            pendingBin = bin;
+            window.__ooPendingDocBin = bin;
+            setStatus('Starting editor …');
+            var docType = detectDocumentType(ext);
+            createEditor(ext, currentFile.name);
+            waitDocumentRendered(docType);
+            if (window.OOEditorState && window.OOEditorState._start) {
+                window.OOEditorState._start(ext, docType, currentFile.name);
+            }
+        }).catch(function (e) {
+            setStatus('Open failed: ' + (e && e.message || e), true);
+        });
+    }
+
+    function waitForEditorApi(cb) {
+        var tries = 0;
+        var timer = setInterval(function () {
+            tries++;
+            var frame = document.querySelector('iframe[name="frameEditor"]');
+            var w = frame && frame.contentWindow;
+            var ed = w && w.Asc && w.Asc.editor;
+            if (ed) { clearInterval(timer); cb(ed); }
+            else if (tries > 300) clearInterval(timer);
+        }, 200);
+    }
+
+    // ---------- save ----------
+    var saveInFlight = false;
+    function saveDocument() {
+        if (saveInFlight) return false;
+        saveInFlight = true;
+        doSave().then(function (ok) { saveInFlight = false; return ok; })
+            .catch(function () { saveInFlight = false; });
+        return true;
+    }
+
+    function doSave() {
+        var frame = document.querySelector('iframe[name="frameEditor"]');
+        if (!frame || !frame.contentWindow || typeof frame.contentWindow.__ooGetFileData !== 'function') {
+            setStatus('Editor not ready', true);
+            return Promise.resolve(false);
+        }
+        setStatus('Saving …');
+        return window.__x2tReadyPromise.then(function (mod) {
+            var bin = frame.contentWindow.__ooGetFileData();
+            if (!bin || !bin.length) throw new Error('No document data');
+
+            var openExt = (window.__ooDocExt || '').toLowerCase();
+            var saveExt;
+            if (openExt === 'pdf') {
+                // PDF is saved as-is (no round-trip conversion); bin is the raw PDF
+                return persistAndDownload(bin.slice(), 'pdf');
+            }
+            var supported = detectBinType(bin);
+            if (supported) {
+                if (openExt && supported.indexOf(openExt) >= 0) {
+                    saveExt = openExt;
+                } else if (openExt && LEGACY_TO_NEW[openExt] && supported.indexOf(LEGACY_TO_NEW[openExt]) >= 0) {
+                    saveExt = LEGACY_TO_NEW[openExt];
+                    setStatus('Note: ' + openExt + ' is a legacy format; saved as ' + saveExt);
+                } else {
+                    saveExt = supported[0];
+                }
+            } else {
+                saveExt = openExt || 'docx';
+            }
+            var bytes = x2tConvert(mod, bin, 'bin', saveExt, 'save').slice();
+            return persistAndDownload(bytes, saveExt);
+        }).then(function () {
+            setStatus('Saved ' + new Date().toLocaleTimeString());
+            setTimeout(function () { setStatus(''); }, 3000);
+            return true;
+        }).catch(function (e) {
+            setStatus('Save failed: ' + (e && e.message || e), true);
+            return false;
+        });
+    }
+
+    function persistAndDownload(bytes, ext) {
+        var name = (currentFile && currentFile.name ? currentFile.name.replace(/\.[^.]+$/, '') : 'document') + '.' + ext;
+        // download to disk
+        var blob = new Blob([bytes], { type: 'application/octet-stream' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+        // persist to IndexedDB library
+        if (window.FileStore) {
+            return window.FileStore.save({
+                id: currentFile && currentFile.id,
+                name: name,
+                ext: ext,
+                data: bytes
+            }).then(function (rec) { currentFile.id = rec.id; refreshLibrary(); return rec; });
+        }
+        return Promise.resolve();
+    }
+
+    // ---------- offline download-as bridge ----------
+    var OFFLINE_FORMAT_EXT = {
+        65: 'docx', 67: 'odt', 68: 'rtf', 69: 'txt',
+        257: 'xlsx', 259: 'ods', 260: 'csv',
+        129: 'pptx', 131: 'odp',
+        513: 'pdf'
+    };
+    var OFFLINE_FORMAT_NAMES = {
+        65: 'DOCX', 66: 'DOC', 67: 'ODT', 68: 'RTF', 69: 'TXT', 70: 'HTML', 73: 'EPUB',
+        257: 'XLSX', 258: 'XLS', 259: 'ODS', 260: 'CSV',
+        129: 'PPTX', 130: 'PPT', 131: 'ODP',
+        513: 'PDF', 515: 'DJVU', 516: 'XPS',
+        1025: 'JPG', 1029: 'PNG'
+    };
+
+    function handleOfflineDownload(msg) {
+        var ext = OFFLINE_FORMAT_EXT[msg.format];
+        if (!ext) { setStatus('Download format #' + msg.format + ' not supported', true); return; }
+        setStatus('Generating ' + ext + ' …');
+        window.__x2tReadyPromise.then(function (mod) {
+            // PDF goes through the async render-bin path; other formats are sync x2t
+            var bytesPromise;
+            if (msg.format === 513) {
+                bytesPromise = x2tRenderBinToPdf(mod, new Uint8Array(msg.buffer));
+            } else {
+                var bin = new Uint8Array(msg.buffer);
+                bytesPromise = Promise.resolve(x2tConvert(mod, bin, 'bin', ext, 'download').slice());
+            }
+            return bytesPromise.then(function (bytes) {
+                var blob = new Blob([bytes], { type: 'application/octet-stream' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = (msg.title || 'document') + '.' + ext;
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                setStatus('Exported ' + ext);
+                setTimeout(function () { setStatus(''); }, 2500);
+            });
+        }).catch(function (e) {
+            setStatus('Export failed: ' + (e && e.message || e), true);
+        });
+    }
+
+    // ---------- PDF render (render bin -> wasm PdfFile) ----------
+    var __fontsIndexPromise = null;
+    function getFontsIndex() {
+        if (!__fontsIndexPromise) {
+            __fontsIndexPromise = fetch('vendor/decoded-fonts/fonts-index.json')
+                .then(function (r) { return r.ok ? r.json() : {}; })
+                .catch(function () { return {}; });
+        }
+        return __fontsIndexPromise;
+    }
+    function parseRenderBinFonts(bin) {
+        var fonts = {};
+        var scanLen = Math.min(bin.length, 1024 * 1024);
+        var dv = bin.buffer && bin.byteOffset !== undefined
+            ? new DataView(bin.buffer, bin.byteOffset, bin.byteLength) : null;
+        if (!dv) return [];
+        for (var i = 0; i < scanLen - 3; i++) {
+            if (bin[i] === 0x29) {
+                var nChars = dv.getUint16(i + 1, true);
+                var nBytes = nChars * 2;
+                if (nBytes > 0 && nBytes < 400 && i + 3 + nBytes <= bin.length) {
+                    var name = '';
+                    for (var k = 0; k < nChars; k++) name += String.fromCharCode(dv.getUint16(i + 3 + k * 2, true));
+                    if (/^[\x20-\x7E]+$/.test(name) && /[a-zA-Z]/.test(name)) fonts[name] = 1;
+                    i += 2 + nBytes;
+                }
+            }
+        }
+        return Object.keys(fonts);
+    }
+    function x2tRenderBinToPdf(mod, renderBin) {
+        var FS = mod.FS;
+        try { FS.mkdir('/working'); } catch (e) {}
+        try { FS.mkdir('/working/fonts'); } catch (e) {}
+        try { FS.mkdir('/working/pdf_tmp'); } catch (e) {}
+        var fontsDir = '/working/fonts';
+        var needed = parseRenderBinFonts(renderBin);
+        return getFontsIndex().then(function (index) {
+            var fetched = {};
+            var chain = Promise.resolve();
+            needed.forEach(function (name) {
+                var entries = index[name.toLowerCase()];
+                if (!entries || !entries.length) return;
+                var entry = entries[0];
+                if (fetched[entry.file]) return;
+                fetched[entry.file] = 1;
+                var fext = entry.kind === 'otf' ? 'otf' : 'ttf';
+                chain = chain.then(function () {
+                    return fetch('vendor/decoded-fonts/' + entry.file + '.' + fext)
+                        .then(function (r) { return r.ok ? r.arrayBuffer() : null; })
+                        .then(function (buf) {
+                            if (!buf) return;
+                            var outName = name.replace(/[\s/\\]/g, '') + '.' + fext;
+                            FS.writeFile(fontsDir + '/' + outName, new Uint8Array(buf));
+                        }).catch(function () {});
+                });
+            });
+            return chain.then(function () {
+                if (!Object.keys(fetched).length) {
+                    var fallbacks = ['DroidSansFallbackFull.ttf', 'DejaVuSans.ttf',
+                        'DejaVuSans-Bold.ttf', 'DejaVuSerif.ttf',
+                        'DejaVuSansMono.ttf', 'LiberationMono-Regular.ttf',
+                        'LiberationMono-Bold.ttf'];
+                    var c2 = Promise.resolve();
+                    fallbacks.forEach(function (f) {
+                        c2 = c2.then(function () {
+                            return fetch('vendor/pdf-fonts/' + f)
+                                .then(function (r) { return r.ok ? r.arrayBuffer() : null; })
+                                .then(function (buf) {
+                                    if (buf) FS.writeFile(fontsDir + '/' + f, new Uint8Array(buf));
+                                }).catch(function () {});
+                        });
+                    });
+                    return c2;
+                }
+            }).then(function () {
+                var ret = mod.ccall('x2t_render_bin_to_pdf', 'number',
+                    ['array', 'number', 'string', 'string'],
+                    [renderBin, renderBin.length, fontsDir + '/', '/working/pdf_tmp/out.pdf']);
+                if (ret !== 0) throw new Error('PDF conversion failed ret=' + ret);
+                return FS.readFile('/working/pdf_tmp/out.pdf').slice();
+            });
+        });
+    }
+
+    // ---------- file library UI ----------
+    function refreshLibrary() {
+        var listEl = document.getElementById('file-list');
+        if (!listEl || !window.FileStore) return;
+        window.FileStore.list().then(function (files) {
+            listEl.innerHTML = '';
+            if (!files.length) {
+                listEl.innerHTML = '<div class="empty-hint">No files yet. Open or create one.</div>';
+                return;
+            }
+            files.forEach(function (f) {
+                var item = document.createElement('div');
+                item.className = 'file-item';
+                item.setAttribute('data-id', f.id);
+                var icon = { docx: '📄', xlsx: '📊', pptx: '📽', pdf: '📕' }[f.ext] || '📄';
+                item.innerHTML =
+                    '<span class="file-icon">' + icon + '</span>' +
+                    '<span class="file-name"></span>' +
+                    '<span class="file-meta">' + formatSize(f.size) + ' · ' + formatDate(f.updatedAt) + '</span>' +
+                    '<button class="file-del" title="Delete">×</button>';
+                item.querySelector('.file-name').textContent = f.name;
+                item.addEventListener('click', function (ev) {
+                    if (ev.target.classList.contains('file-del')) return;
+                    loadFromFileStore(f.id);
+                });
+                item.querySelector('.file-del').addEventListener('click', function (ev) {
+                    ev.stopPropagation();
+                    if (confirm('Delete "' + f.name + '"?')) {
+                        window.FileStore.remove(f.id).then(refreshLibrary);
+                    }
+                });
+                listEl.appendChild(item);
+            });
+        });
+    }
+    function formatSize(n) {
+        if (n == null) return '';
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1048576).toFixed(1) + ' MB';
+    }
+    function formatDate(ts) {
+        if (!ts) return '';
+        var d = new Date(ts);
+        return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function loadFromFileStore(id) {
+        window.FileStore.get(id).then(function (rec) {
+            if (!rec) return;
+            openFile({ id: rec.id, name: rec.name, ext: rec.ext, data: new Uint8Array(rec.data) });
+        });
+    }
+
+    // ---------- home screen / upload ----------
+    function showHome() {
+        var home = document.getElementById('home');
+        if (home) home.style.display = '';
+        var ed = document.getElementById('editor');
+        if (ed) ed.style.display = 'none';
+        refreshLibrary();
+    }
+    function hideHome() {
+        var home = document.getElementById('home');
+        if (home) home.style.display = 'none';
+        var ed = document.getElementById('editor');
+        if (ed) ed.style.display = '';
+    }
+
+    function handleFiles(fileList) {
+        if (!fileList || !fileList.length) return;
+        var f = fileList[0];
+        var name = f.name || 'untitled';
+        var dot = name.lastIndexOf('.');
+        var ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : (PAGE_TYPE || 'docx');
+        f.arrayBuffer().then(function (buf) {
+            openFile({ name: name, ext: ext, data: new Uint8Array(buf) });
+        });
+    }
+
+    function createNew(ext) {
+        ext = ext || PAGE_TYPE || 'docx';
+        var emptyUrl = { docx: 'assets/empty.docx', xlsx: 'assets/empty.xlsx', pptx: 'assets/empty.pptx', pdf: 'assets/empty.pdf' }[ext];
+        if (!emptyUrl) return;
+        fetch(emptyUrl).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+            var name = 'untitled.' + ext;
+            openFile({ name: name, ext: ext, data: new Uint8Array(buf) });
+        });
+    }
+
+    // ---------- boot ----------
+    function boot() {
+        // Set up the emscripten Module, then load x2t.js dynamically. Doing it
+        // here (instead of a <script> tag) lets the thin entry pages share one
+        // code path. onRuntimeInitialized fires once the wasm HEAP views exist.
+        if (!window.__x2tReadyPromise) {
+            window.__x2tReadyPromise = new Promise(function (resolve) {
+                window.Module = { onRuntimeInitialized: function () { resolve(window.Module); } };
+                var s = document.createElement('script');
+                s.src = '/vendor/sdkjs/common/wasm/x2t/x2t.js';
+                document.head.appendChild(s);
+            });
+        }
+
+        // message bridge from the editor iframe
+        window.addEventListener('message', function (e) {
+            var d = e.data;
+            if (!d) return;
+            if (d.type === 'oo-empty-doc-real') emptyDocGotReal = true;
+            else if (d.type === 'oo-save-request') saveDocument();
+            else if (d.type === 'oo-download-request') handleOfflineDownload(d);
+            else if (d.type === 'oo-download-unsupported') {
+                var nm = OFFLINE_FORMAT_NAMES[d.format] || ('format #' + d.format);
+                setStatus('Offline export of ' + nm + ' is not supported', true);
+                setTimeout(function () { setStatus(''); }, 4000);
+            }
+            else if (d.type === 'oo-print-unsupported') {
+                setStatus('Printing is not supported offline', true);
+                setTimeout(function () { setStatus(''); }, 4000);
+            }
+        });
+
+        // Ctrl+S / Cmd+S
+        window.addEventListener('keydown', function (e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                saveDocument();
+            }
+        });
+
+        // home screen wiring
+        var uploadInput = document.getElementById('upload-input');
+        var uploadBtn = document.getElementById('upload-btn');
+        var dropZone = document.getElementById('home');
+        if (uploadBtn && uploadInput) {
+            uploadBtn.addEventListener('click', function () { uploadInput.click(); });
+            uploadInput.addEventListener('change', function () { handleFiles(uploadInput.files); });
+        }
+        // per-type "New" buttons (data-new="docx|xlsx|pptx|pdf")
+        var newActions = document.getElementById('new-actions');
+        if (newActions) {
+            newActions.addEventListener('click', function (e) {
+                var btn = e.target.closest('[data-new]');
+                if (btn) createNew(btn.getAttribute('data-new'));
+            });
+            // On a type-specific entry page, highlight that type's button
+            if (PAGE_TYPE) {
+                var focus = newActions.querySelector('[data-new="' + PAGE_TYPE + '"]');
+                if (focus) focus.classList.add('primary');
+            }
+        }
+        if (dropZone) {
+            dropZone.addEventListener('dragover', function (e) { e.preventDefault(); dropZone.classList.add('dragover'); });
+            dropZone.addEventListener('dragleave', function () { dropZone.classList.remove('dragover'); });
+            dropZone.addEventListener('drop', function (e) {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+                handleFiles(e.dataTransfer.files);
+            });
+        }
+
+        // ?open=<id> deep link into a stored file
+        if (PARAMS.open && window.FileStore) {
+            loadFromFileStore(PARAMS.open);
+        } else if (PARAMS.autonew) {
+            createNew(PAGE_TYPE || 'docx');
+        } else {
+            showHome();
+        }
+    }
+
+    // expose a small API for embedding / testing
+    window.OfficeApp = {
+        openFile: openFile,
+        saveDocument: saveDocument,
+        createNew: createNew,
+        version: BUILD_VERSION
+    };
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', boot);
+    } else {
+        boot();
+    }
+})();
