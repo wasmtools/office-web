@@ -1,74 +1,26 @@
-/*
- * Copyright (C) Ascensio System SIA, 2009-2026
- *
- * This program is a free software product. You can redistribute it and/or
- * modify it under the terms of the GNU Affero General Public License (AGPL)
- * version 3 as published by the Free Software Foundation, together with the
- * additional terms provided in the LICENSE file.
- *
- * This program is distributed WITHOUT ANY WARRANTY; without even the implied
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
- * details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
- *
- * You can contact Ascensio System SIA by email at info@onlyoffice.com
- * or by postal mail at 20A-6 Ernesta Birznieka-Upisha Street, Riga,
- * LV-1050, Latvia, European Union.
- *
- * The interactive user interfaces in modified versions of the Program
- * are required to display Appropriate Legal Notices in accordance with
- * Section 5 of the GNU AGPL version 3.
- *
- * No trademark rights are granted under this License.
- *
- * All non-code elements of the Product, including illustrations,
- * icon sets, and technical writing content, are licensed under the
- * Creative Commons Attribution-ShareAlike 4.0 International License:
- * https://creativecommons.org/licenses/by-sa/4.0/legalcode
- *
- * This license applies only to such non-code elements and does not
- * modify or replace the licensing terms applicable to the Program's
- * source code, which remains licensed under the GNU Affero General
- * Public License v3.
- *
- * SPDX-License-Identifier: AGPL-3.0-only
- */
-/**
- *  ComboBoxFonts.js
- *
- *  Created on 2/11/14
- *
- */
 
 if (Common === undefined)
     var Common = {};
 
 var FONT_TYPE_RECENT = 4;
 
-// 自定义字体的中文显示名（仅 fallback 缩略图绘制用）。
-// 内部名必须保持英文（selection_bin 匹配 + 渲染 bin → fonts-index.json 的 PDF 所见即所得
-// 都靠它）；这里只负责下拉列表里"看得见的名字"。加新自定义字体时在此扩展。
 var FONT_DISPLAY_NAMES = {
-    'Noto Sans SC'  : '思源黑体',
-    'Noto Serif SC' : '思源宋体'
+    'Noto Sans SC'  : 'Noto Sans SC',
+    'Noto Serif SC' : 'Noto Serif SC'
 };
 
-// 自定义字体的真实字体文件（decoded-fonts/ 下，add-font.py 生成的池 id 解密件）。
-// fallback 绘制用 FontFace 加载**该字体本身**渲染名字——真实缩略图（allfontsgen）就是
-// 用实际字体渲染的。用系统 sans-serif 画中文（尤其宋体）会因缺字形回退成窄字符，极小。
-// 加新自定义字体时在此扩展。
 var FONT_FILES = {
     'Noto Sans SC'  : '188.ttf',
     'Noto Serif SC' : '189.ttf'
 };
 
-// 已加载的 fallback 字体缓存：name -> 'loaded' | 'loading' | 'failed'
 var _fallbackFontState = {};
 
 function ensureFallbackFont(name) {
     var file = FONT_FILES[name];
     if (!file || _fallbackFontState[name]) return false;
     _fallbackFontState[name] = 'loading';
-    // 相对 iframe 页面（.../documenteditor/main/）上溯 4 级到 vendor/decoded-fonts/
+
     var url = new URL('../../../../decoded-fonts/' + file, document.baseURI).href;
     try {
         fetch(url).then(function(resp) {
@@ -76,7 +28,7 @@ function ensureFallbackFont(name) {
             return resp.arrayBuffer();
         }).then(function(buf) {
             if (!buf) return;
-            // 用唯一 family 名（加 __fb 前缀）避免与编辑器已注册的同名真实字体冲突
+
             var faceName = '__fb_' + name;
             var ff = new FontFace(faceName, buf);
             return ff.load();
@@ -84,7 +36,7 @@ function ensureFallbackFont(name) {
             if (face) { document.fonts.add(face); _fallbackFontState[name] = 'loaded'; }
         }).catch(function() { _fallbackFontState[name] = 'failed'; });
     } catch (e) { _fallbackFontState[name] = 'failed'; }
-    return true;  // 正在加载
+    return true;
 }
 
 define([
@@ -104,12 +56,7 @@ define([
                 {ratio: 1.5,    path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@1.5x.png', width: iconWidth * 1.5, height: iconHeight * 1.5},
                 {ratio: 1.75,   path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@1.75x.png', width: iconWidth * 1.75, height: iconHeight * 1.75},
                 {ratio: 2,      path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@2x.png', width: iconWidth * 2, height: iconHeight * 2},
-                /*{ratio: 2.5,    path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@2.5x.png', width: iconWidth * 2.5, height: iconHeight * 2.5},
-                {ratio: 3,      path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@3x.png', width: iconWidth * 3, height: iconHeight * 3},
-                {ratio: 3.5,    path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@3.5x.png', width: iconWidth * 3.5, height: iconHeight * 3.5},
-                {ratio: 4,      path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@4x.png', width: iconWidth * 4, height: iconHeight * 4},
-                {ratio: 4.5,    path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@4.5x.png', width: iconWidth * 4.5, height: iconHeight * 4.5},
-                {ratio: 5,      path: '../../../../sdkjs/common/Images/fonts_thumbnail' + postfix + '@5x.png', width: iconWidth * 5, height: iconHeight * 5},*/
+
             ],
             thumbIdx = 0,
             listItemHeight  = 28,
@@ -122,12 +69,7 @@ define([
             thumbs[2].path     = Common.Controllers.Desktop.call('getFontsSprite', '@1.5x');
             thumbs[3].path     = Common.Controllers.Desktop.call('getFontsSprite', '@1.75x');
             thumbs[4].path     = Common.Controllers.Desktop.call('getFontsSprite', '@2x');
-            /*thumbs[5].path     = Common.Controllers.Desktop.call('getFontsSprite', '@2.5x');
-            thumbs[6].path     = Common.Controllers.Desktop.call('getFontsSprite', '@3x');
-            thumbs[7].path     = Common.Controllers.Desktop.call('getFontsSprite', '@3.5x');
-            thumbs[8].path     = Common.Controllers.Desktop.call('getFontsSprite', '@4x');
-            thumbs[9].path     = Common.Controllers.Desktop.call('getFontsSprite', '@4.5x');
-            thumbs[10].path    = Common.Controllers.Desktop.call('getFontsSprite', '@5x');*/
+
         }
 
         var bestDistance = Math.abs(applicationPixelRatio-thumbs[0].ratio);
@@ -146,7 +88,6 @@ define([
 
         function CThumbnailLoader() {
             this.supportBinaryFormat = !(Common.Controllers.Desktop.isActive() && !Common.Controllers.Desktop.isFeatureAvailable('isSupportBinaryFontsSprite'));
-            // Our format is an alpha mask with rle compression for fully transparent pixels
 
             this.image = null;
             this.binaryFormat = null;
@@ -180,7 +121,7 @@ define([
                         xhr.setRequestHeader('Accept-Charset', 'x-user-defined');
 
                     xhr.onload = function() {
-                        // TODO: check errors
+
                         me.binaryFormat = new Uint8Array(this.response);
                         callback();
                     };
@@ -190,7 +131,6 @@ define([
             };
 
             this.openBinary = function(arrayBuffer) {
-                //var t1 = performance.now();
 
                 var binaryAlpha = this.binaryFormat;
                 this.width      = (binaryAlpha[0] << 24) | (binaryAlpha[1] << 16) | (binaryAlpha[2] << 8) | (binaryAlpha[3] << 0);
@@ -201,7 +141,7 @@ define([
                 var MAX_MEMORY_SIZE = 50000000;
                 var memorySize = 4 * this.width * this.height;
                 var isOffsets = (memorySize > MAX_MEMORY_SIZE) ? true : false;
-                    
+
                 if (!isOffsets)
                     this.data = new Uint8ClampedArray(memorySize);
                 else
@@ -223,7 +163,7 @@ define([
                             while (len0 > 0) {
                                 len0--;
                                 imagePixels[index] = imagePixels[index + 1] = imagePixels[index + 2] = 255;
-                                imagePixels[index + 3] = 0; // this value is already 0.
+                                imagePixels[index + 3] = 0;
                                 index += 4;
                             }
                         } else {
@@ -260,13 +200,10 @@ define([
                 if (!this.offsets)
                     delete this.binaryFormat;
 
-                //var t2 = performance.now();
-                //console.log(t2 - t1);
             };
 
             this.getImage = function(index, canvas, ctx) {
 
-                //var t1 = performance.now();
                 if (this.supportBinaryFormat) {
                     if (!this.data && !this.offsets) {
                         this.openBinary(this.binaryFormat);
@@ -283,9 +220,6 @@ define([
                         ctx = canvas.getContext("2d");
                     }
 
-                    // 越界保护：自定义字体可能超过缩略图 bin 的 count（bin 是生成时的字体数，
-                    // 后续 add-font.py 加字体不会重生成缩略图）。index 超界时返回空 canvas，
-                    // 避免 new Uint8ClampedArray(length) 抛 RangeError 导致字体下拉崩溃。
                     if (index < 0 || index >= this.count) {
                         return canvas;
                     }
@@ -303,13 +237,7 @@ define([
                         var tmpValue = 0, len0 = 0;
                         var imagePixels = dataTmp.data;
                         if (-1 != this.offsets[index].len) {
-                            /*
-                            // this values is already 0.
-                            for (var i = 0; i < this.offsets[index].len; i++) {
-                                pixels[alphaChannel] = 0;
-                                alphaChannel += 4;
-                            }
-                            */
+
                             alphaChannel += 4 * this.offsets[index].len;
                         }
                         while (pixelsCount > 0) {
@@ -321,7 +249,7 @@ define([
                                 while (len0 > 0) {
                                     len0--;
                                     imagePixels[alphaChannel] = imagePixels[alphaChannel + 1] = imagePixels[alphaChannel + 2] = 255;
-                                    imagePixels[alphaChannel + 3] = 0; // this value is already 0.
+                                    imagePixels[alphaChannel + 3] = 0;
                                     alphaChannel += 4;
                                     pixelsCount--;
                                 }
@@ -349,9 +277,6 @@ define([
                     ctx.clearRect(0, 0, this.width, this.heightOne);
                     ctx.drawImage(this.image, 0, -this.heightOne * index);
                 }
-
-                //var t2 = performance.now();
-                //console.log(t2 - t1);
 
                 return canvas;
             };
@@ -389,7 +314,6 @@ define([
                 var filter = Common.localStorage.getKeysFilter();
                 this.appPrefix = (filter && filter.length) ? filter.split(',')[0] : '';
 
-                // Common.NotificationCenter.on('fonts:change',    _.bind(this.onApiChangeFont, this));
                 Common.NotificationCenter.on('fonts:load',      _.bind(this.fillFonts, this));
             },
 
@@ -420,12 +344,12 @@ define([
             onAfterKeydownMenu: function(e) {
                 var me = this;
                 if (e.keyCode == Common.UI.Keys.RETURN) {
-                     if ($(e.target).closest('input').length) { // enter in input field
+                     if ($(e.target).closest('input').length) {
                         if (this.lastValue !== this._input.val())
                             this._input.trigger('change');
                         else
                             return true;
-                    } else { // enter in dropdown list
+                    } else {
                         $(e.target).click();
                         if (this.rendered) {
                             if (Common.Utils.isIE)
@@ -474,9 +398,9 @@ define([
                                     text = me._selectedItem.get(me.displayField),
                                     inputVal = input.value;
                                 if (me.rendered)  {
-                                    if (document.selection) { // IE
+                                    if (document.selection) {
                                         document.selection.createRange().text = text;
-                                    } else if (input.selectionStart || input.selectionStart == '0') { //FF and Webkit
+                                    } else if (input.selectionStart || input.selectionStart == '0') {
                                         input.value = text;
                                         input.selectionStart = inputVal.length;
                                         input.selectionEnd = text.length;
@@ -523,8 +447,7 @@ define([
             },
 
             onInputChanged: function(e, extra) {
-                // skip processing for internally-generated synthetic event
-                // to avoid double processing
+
                 if (extra && extra.synthetic)
                     return;
 
@@ -544,7 +467,7 @@ define([
                     $(e.target).val(val);
                     this.selectCandidate(true);
                 }
-                
+
                 if (this.lastValue === val && !(extra && extra.reapply)) {
                     if (extra && extra.onkeydown)
                         this.trigger('combo:blur', this, e);
@@ -572,7 +495,6 @@ define([
                     this.closeMenu();
                 }
 
-                // trigger changed event
                 this.trigger('changed:after', this, record, e);
             },
 
@@ -823,8 +745,6 @@ define([
                     }
                 }
 
-                // openBinary 是懒调用（首次 getImage 才解析 bin），在此之前 count=0，
-                // 会误判所有字体越界 → 全部走 fallback → 下拉空白。先显式解析。
                 var spr = me.spriteThumbs;
                 if (spr && !spr.data && !spr.offsets && spr.binaryFormat) {
                     spr.openBinary(spr.binaryFormat);
@@ -845,15 +765,7 @@ define([
                             index = Math.floor(me.store.at(j).get('imgidx')/spriteCols);
                             var fontImage;
                             if (index < 0 || index >= me.spriteThumbs.count) {
-                                // 自定义字体无缩略图：thumbnail bin 是生成时的字体数，
-                                // add-font.py 后续追加的字体 imgidx 超界。用字体名文本兜底，
-                                // 保证列表里可见、可点击（选中后按 selection_bin 匹配生效）。
-                                // 注意：canvas 内部尺寸是 spriteThumbs 的高分辨率 bin（DPR=2 时
-                                // 600×56），CSS 缩放显示成 300×28。绘制必须用内部尺寸做单位，
-                                // 否则在 56px 格里按 28px 画会靠上（文字只占上半格）。
-                                // canvas 里用 FontFace 画中文在 iframe 环境会因 sdkjs 字体管治
-                                // 异常（字形丢失/窄）。改用 CSS span——浏览器原生文本渲染走
-                                // document.fonts，动态加载的 FontFace 可靠，flex 居中与字体无关。
+
                                 var fname = FONT_DISPLAY_NAMES[me.store.at(j).get('name')] || me.store.at(j).get('name');
                                 fontImage = document.createElement('span');
                                 fontImage.style.cssText = [
@@ -869,11 +781,11 @@ define([
                                     'white-space:nowrap'
                                 ].join(';');
                                 var realName = me.store.at(j).get('name');
-                                // 字体加载完成前用继承字体占位，加载后用真实字体重绘
+
                                 fontImage.textContent = fname;
                                 if (_fallbackFontState[realName] === 'loaded')
                                     fontImage.style.fontFamily = '"__fb_' + realName + '"';
-                                // 触发真实字体异步加载，加载完成后重绘该 tile（span 换 font-family）
+
                                 if (ensureFallbackFont(realName)) {
                                     (function(idx) {
                                         setTimeout(function() {
