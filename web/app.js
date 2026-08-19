@@ -28,12 +28,22 @@
     var PAGE_TYPE = window.__OO_PAGE_TYPE || PARAMS.type || typeFromPath();
 
     var statusEl = document.getElementById('status');
+    var titlebarStatusEl = document.getElementById('titlebar-status');
     function setStatus(msg, isError) {
-        if (!statusEl) return;
-        if (!msg) { statusEl.textContent = ''; statusEl.classList.remove('show'); return; }
-        statusEl.textContent = msg;
-        statusEl.classList.add('show');
-        statusEl.classList.toggle('error', !!isError);
+        // The floating chip is for the home screen; while a document is open
+        // the same message is mirrored into the title bar.
+        if (statusEl) {
+            if (!msg) { statusEl.textContent = ''; statusEl.classList.remove('show'); }
+            else {
+                statusEl.textContent = msg;
+                statusEl.classList.add('show');
+                statusEl.classList.toggle('error', !!isError);
+            }
+        }
+        if (titlebarStatusEl) {
+            titlebarStatusEl.textContent = msg || '';
+            titlebarStatusEl.classList.toggle('error', !!isError && !!msg);
+        }
     }
 
     // ---------- x2t.wasm conversion ----------
@@ -291,7 +301,14 @@
                 name: name,
                 ext: ext,
                 data: bytes
-            }).then(function (rec) { currentFile.id = rec.id; currentFile.name = name; currentFile.ext = ext; refreshLibrary(); return rec; });
+            }).then(function (rec) {
+                currentFile.id = rec.id; currentFile.name = name; currentFile.ext = ext;
+                document.title = name;
+                var nameEl = document.getElementById('titlebar-name');
+                if (nameEl) nameEl.textContent = name;
+                refreshLibrary();
+                return rec;
+            });
         }
         return Promise.resolve();
     }
@@ -401,16 +418,16 @@
     }
 
     // ---------- home screen / upload ----------
-    function setBackHomeVisible(visible) {
-        var btn = document.getElementById('back-home');
-        if (btn) btn.style.display = visible ? 'inline-flex' : 'none';
+    function showTitlebar(visible) {
+        var bar = document.getElementById('titlebar');
+        if (bar) bar.classList.toggle('show', visible);
     }
     function showHome() {
         var home = document.getElementById('home');
         if (home) home.style.display = '';
         var ed = document.getElementById('editor');
         if (ed) ed.style.display = 'none';
-        setBackHomeVisible(false);
+        showTitlebar(false);
         document.title = 'Office Web';
         refreshLibrary();
     }
@@ -419,7 +436,9 @@
         if (home) home.style.display = 'none';
         var ed = document.getElementById('editor');
         if (ed) ed.style.display = '';
-        setBackHomeVisible(true);
+        showTitlebar(true);
+        var nameEl = document.getElementById('titlebar-name');
+        if (nameEl) nameEl.textContent = currentFile ? currentFile.name : '';
     }
 
     // Back-to-home: return to the file library without reloading the page.
@@ -510,9 +529,11 @@
             uploadBtn.addEventListener('click', function () { uploadInput.click(); });
             uploadInput.addEventListener('change', function () { handleFiles(uploadInput.files); });
         }
-        // back-to-home button
+        // title bar buttons
         var backHomeBtn = document.getElementById('back-home');
         if (backHomeBtn) backHomeBtn.addEventListener('click', backToHome);
+        var saveBtn = document.getElementById('save-btn');
+        if (saveBtn) saveBtn.addEventListener('click', function () { saveDocument(); });
 
         // per-type "New" buttons (data-new="docx|xlsx|pptx")
         var newActions = document.getElementById('new-actions');
