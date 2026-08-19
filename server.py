@@ -49,6 +49,23 @@ MIME_OVERRIDES = {
 _GZIP_CACHE = {}
 _GZIP_CACHE_MAX = 64
 
+# Browser caching policy. Assets under vendor/ are shipped per release and
+# change rarely, so they may be cached long-term (revalidation via
+# Last-Modified keeps them fresh). App files and pages are small, so
+# no-cache (revalidate) is cheap and always up to date.
+CACHE_LONG = 'public, max-age=2592000'      # 30 days
+CACHE_REVALIDATE = 'no-cache'               # may cache, must revalidate
+
+
+def cache_policy(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext in ('.html', '.htm'):
+        return CACHE_REVALIDATE
+    parts = path.replace(os.sep, '/').split('/')
+    if 'vendor' in parts or 'assets' in parts:
+        return CACHE_LONG
+    return CACHE_REVALIDATE
+
 
 class StaticHandler(SimpleHTTPRequestHandler):
     root = '.'
@@ -116,7 +133,7 @@ class StaticHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         if encoding:
             self.send_header('Content-Encoding', encoding)
-        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Cache-Control', cache_policy(path))
         self.end_headers()
         self.wfile.write(body)
 
@@ -142,7 +159,7 @@ class StaticHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Type', self.guess_type(path))
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Content-Encoding', 'gzip')
-        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Cache-Control', cache_policy(path))
         self.end_headers()
         self.wfile.write(body)
 

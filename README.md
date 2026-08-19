@@ -86,6 +86,13 @@ office-web/
 - **Legacy formats** (`doc`, `ppt`, `csv`) can be opened; on save they are
   written back as their modern equivalents (`docx`, `pptx`, `xlsx`) because
   the open-source converter has no legacy writers.
+- **x2t.wasm download**: the 36 MB converter is downloaded with a progress
+  indicator on first visit, then stored in the browser **Cache API** keyed by
+  the build version, so later visits load it instantly. Bump `BUILD_VERSION`
+  in `web/app.js` on every release so clients pick up a new wasm exactly once.
+- **HTTP caching**: the server sends `Cache-Control: public, max-age=2592000`
+  (30 days) for `vendor/` and `assets/` files and `no-cache` (revalidate) for
+  app files and pages. When serving behind your own proxy, mirror this policy.
 - **PDF** support was removed: PDF editing and saving had serious issues.
   PDF files are rejected with a message at open time.
 

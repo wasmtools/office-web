@@ -12,7 +12,9 @@
 (function () {
     'use strict';
 
-    var BUILD_VERSION = '1.0.0';
+    // Bump on every deploy: keys the Cache API entry for x2t.wasm, so users
+    // re-download the converter exactly once per release.
+    var BUILD_VERSION = '1.1.0';
     window.__OO_BUILD_VERSION = BUILD_VERSION;
 
     // ---------- config from URL ----------
@@ -542,19 +544,105 @@
         });
     }
 
+    // ---------- x2t.wasm loading with progress ----------
+    var X2T_DIR = '/vendor/sdkjs/common/wasm/x2t/';
+
+    // Download the 36MB x2t.wasm with progress reporting.
+    function downloadWasm(url) {
+        return fetch(url).then(function (resp) {
+            if (!resp.ok) throw new Error('wasm download failed: HTTP ' + resp.status);
+            var total = parseInt(resp.headers.get('Content-Length'), 10) || 0;
+            if (!resp.body) {
+                setStatus('Downloading converter …');
+                return resp.arrayBuffer();
+            }
+            var reader = resp.body.getReader();
+            var chunks = [], received = 0, lastUi = 0;
+            function pump() {
+                return reader.read().then(function (r) {
+                    if (r.done) return;
+                    chunks.push(r.value);
+                    received += r.value.length;
+                    var now = Date.now();
+                    if (now - lastUi > 150) {
+                        lastUi = now;
+                        var pct = total ? ' (' + Math.floor(received * 100 / total) + '%)' : '';
+                        setStatus('Downloading converter… ' + formatSize(received) +
+                            (total ? ' / ' + formatSize(total) : '') + pct);
+                    }
+                    return pump();
+                });
+            }
+            return pump().then(function () {
+                var buf = new Uint8Array(received);
+                var pos = 0;
+                chunks.forEach(function (c) { buf.set(c, pos); pos += c.length; });
+                return buf.buffer;
+            });
+        });
+    }
+
+    // Fetch x2t.wasm, serving it from the Cache API when possible. The entry
+    // is keyed by BUILD_VERSION, so a new deployment (which bumps the version)
+    // downloads the new wasm exactly once and old entries are dropped.
+    function fetchWasmWithProgress() {
+        var url = X2T_DIR + 'x2t.wasm';
+        var cacheKey = X2T_DIR + 'x2t.wasm#v' + BUILD_VERSION;
+        var cachePromise = (window.caches && caches.open)
+            ? caches.open('oo-x2t-v1').catch(function () { return null; })
+            : Promise.resolve(null);
+        return cachePromise.then(function (cache) {
+            if (!cache) return downloadWasm(url);
+            return cache.match(cacheKey).then(function (cached) {
+                if (cached) {
+                    setStatus('Loading converter (cached) …');
+                    return cached.arrayBuffer();
+                }
+                return downloadWasm(url).then(function (buf) {
+                    return cache.put(cacheKey, new Response(buf)).catch(function () {}).then(function () {
+                        // drop entries left over from older versions
+                        return cache.keys().catch(function () { return []; }).then(function (keys) {
+                            var keep = new Request(cacheKey).url;
+                            return Promise.all(keys.map(function (k) {
+                                return k.url !== keep ? cache.delete(k) : null;
+                            }));
+                        }).catch(function () {}).then(function () { return buf; });
+                    });
+                });
+            });
+        });
+    }
+
+    function loadX2t() {
+        if (window.__x2tReadyPromise) return window.__x2tReadyPromise;
+        window.__x2tReadyPromise = new Promise(function (resolve, reject) {
+            fetchWasmWithProgress().then(function (bytes) {
+                setStatus('Initializing converter …');
+                // Set up the emscripten Module, then load x2t.js dynamically.
+                // wasmBinary skips the glue's own fetch; locateFile keeps any
+                // secondary lookup (e.g. the .mem file) on the right path.
+                // onRuntimeInitialized fires once the wasm HEAP views exist.
+                window.Module = {
+                    wasmBinary: bytes,
+                    locateFile: function (path) { return X2T_DIR + path; },
+                    onRuntimeInitialized: function () { resolve(window.Module); }
+                };
+                var s = document.createElement('script');
+                s.src = X2T_DIR + 'x2t.js';
+                s.onerror = function () { reject(new Error('Failed to load x2t.js')); };
+                document.head.appendChild(s);
+            }).catch(function (e) {
+                window.__x2tReadyPromise = null; // allow retry on next action
+                setStatus('Converter load failed: ' + (e && e.message || e), true);
+                reject(e);
+            });
+        });
+        return window.__x2tReadyPromise;
+    }
+
     // ---------- boot ----------
     function boot() {
-        // Set up the emscripten Module, then load x2t.js dynamically. Doing it
-        // here (instead of a <script> tag) lets the thin entry pages share one
-        // code path. onRuntimeInitialized fires once the wasm HEAP views exist.
-        if (!window.__x2tReadyPromise) {
-            window.__x2tReadyPromise = new Promise(function (resolve) {
-                window.Module = { onRuntimeInitialized: function () { resolve(window.Module); } };
-                var s = document.createElement('script');
-                s.src = '/vendor/sdkjs/common/wasm/x2t/x2t.js';
-                document.head.appendChild(s);
-            });
-        }
+        loadX2t().catch(function () {});
 
         // message bridge from the editor iframe
         window.addEventListener('message', function (e) {
