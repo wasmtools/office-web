@@ -269,7 +269,7 @@
             var saveExt;
             if (openExt === 'pdf') {
                 // PDF is saved as-is (no round-trip conversion); bin is the raw PDF
-                return persistAndDownload(bin.slice(), 'pdf');
+                return persistToLibrary(bin.slice(), 'pdf');
             }
             var supported = detectBinType(bin);
             if (supported) {
@@ -285,7 +285,7 @@
                 saveExt = openExt || 'docx';
             }
             var bytes = x2tConvert(mod, bin, 'bin', saveExt, 'save').slice();
-            return persistAndDownload(bytes, saveExt);
+            return persistToLibrary(bytes, saveExt);
         }).then(function () {
             setStatus('Saved ' + new Date().toLocaleTimeString());
             setTimeout(function () { setStatus(''); }, 3000);
@@ -296,27 +296,33 @@
         });
     }
 
-    function persistAndDownload(bytes, ext) {
-        var name = (currentFile && currentFile.name ? currentFile.name.replace(/\.[^.]+$/, '') : 'document') + '.' + ext;
-        // download to disk
-        var blob = new Blob([bytes], { type: 'application/octet-stream' });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
-        // persist to IndexedDB library
+    // Persist to the IndexedDB file library only (no browser download).
+    // Saving keeps the document in the library; downloading is a separate
+    // action available via File > Download As.
+    function persistToLibrary(bytes, ext) {
+        var base = currentFile && currentFile.name ? currentFile.name.replace(/\.[^.]+$/, '') : 'document';
+        var name = base + '.' + ext;
         if (window.FileStore) {
             return window.FileStore.save({
                 id: currentFile && currentFile.id,
                 name: name,
                 ext: ext,
                 data: bytes
-            }).then(function (rec) { currentFile.id = rec.id; refreshLibrary(); return rec; });
+            }).then(function (rec) { currentFile.id = rec.id; currentFile.name = name; currentFile.ext = ext; refreshLibrary(); return rec; });
         }
         return Promise.resolve();
+    }
+
+    // Trigger a browser download of the given bytes under the given filename.
+    function triggerDownload(bytes, filename) {
+        var blob = new Blob([bytes], { type: 'application/octet-stream' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
     }
 
     // ---------- offline download-as bridge ----------
@@ -348,14 +354,11 @@
                 bytesPromise = Promise.resolve(x2tConvert(mod, bin, 'bin', ext, 'download').slice());
             }
             return bytesPromise.then(function (bytes) {
-                var blob = new Blob([bytes], { type: 'application/octet-stream' });
-                var url = URL.createObjectURL(blob);
-                var a = document.createElement('a');
-                a.href = url;
-                a.download = (msg.title || 'document') + '.' + ext;
-                document.body.appendChild(a);
-                a.click();
-                setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                // msg.title from asc_getDocumentName() already carries an extension
+                // (e.g. "untitled.docx"); strip it before appending the target format,
+                // otherwise Download As produces "untitled.docx.docx".
+                var base = (msg.title || 'document').replace(/\.[^.]+$/, '');
+                triggerDownload(bytes, base + '.' + ext);
                 setStatus('Exported ' + ext);
                 setTimeout(function () { setStatus(''); }, 2500);
             });
