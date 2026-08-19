@@ -97,9 +97,9 @@
     (function () {
 
         var SUPPORTED = {
-            DE:  { 65:1, 67:1, 68:1, 69:1, 513:1 },
-            SSE: { 257:1, 259:1, 260:1, 513:1 },
-            PE:  { 129:1, 131:1, 513:1 }
+            DE:  { 65:1, 67:1, 68:1, 69:1 },
+            SSE: { 257:1, 259:1, 260:1 },
+            PE:  { 129:1, 131:1 }
         };
         var NS_LIST = ['DE', 'SSE', 'PE'];
         function getEditorNs() {
@@ -166,9 +166,9 @@
             var original = target.asc_DownloadAs;
 
             var SUPPORTED = {
-                DE:  { 65:1, 67:1, 68:1, 69:1, 513:1 },
-                SSE: { 257:1, 259:1, 260:1, 513:1 },
-                PE:  { 129:1, 131:1, 513:1 }
+                DE:  { 65:1, 67:1, 68:1, 69:1 },
+                SSE: { 257:1, 259:1, 260:1 },
+                PE:  { 129:1, 131:1 }
             };
 
             var ns = null;
@@ -183,24 +183,8 @@
                     if (sup[fileType]) {
                         var title = (ed.asc_getDocumentName ? ed.asc_getDocumentName() : 'document') || 'document';
                         var copy = null;
-                        if (fileType === 513) {
-
-                            try {
-                                if (!window.native) window.native = { Save_End: function(){}, Save_Begin: function(){} };
-                                var renderData = ed.asc_nativeGetPDF({});
-                                delete window.native;
-                                if (renderData && renderData.length) {
-                                    copy = renderData.slice();
-                                }
-                            } catch (e) {
-                                window.parent.postMessage({ type: 'oo-download-unsupported', format: fileType, reason: 'render:' + e.message }, '*');
-                                return;
-                            }
-                        } else {
-
-                            var bin = window.__ooGetFileData && window.__ooGetFileData();
-                            if (bin && bin.length) copy = bin.slice();
-                        }
+                        var bin = window.__ooGetFileData && window.__ooGetFileData();
+                        if (bin && bin.length) copy = bin.slice();
                         if (copy && copy.length) {
                             window.parent.postMessage({
                                 type: 'oo-download-request',

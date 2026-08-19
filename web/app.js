@@ -6,7 +6,6 @@
  *
  *   open : file bytes -> x2t (docx|xlsx|pptx -> bin) -> editor.openDocument({buffer})
  *   save : editor bin -> x2t (bin -> docx|xlsx|pptx) -> download / IndexedDB
- *   pdf  : raw PDF bytes -> editor.openDocument (view + annotate)
  *
  * Files are persisted in IndexedDB (see store.js) so they survive reloads.
  */
@@ -23,7 +22,7 @@
     // Determine the entry type. Priority: explicit global (?set by an embedder),
     // ?type= param, then the page filename (docx.html -> 'docx', etc.).
     function typeFromPath() {
-        var m = /\/(docx|xlsx|pptx|pdf)\.html$/.exec(window.location.pathname);
+        var m = /\/(docx|xlsx|pptx)\.html$/.exec(window.location.pathname);
         return m ? m[1] : '';
     }
     var PAGE_TYPE = window.__OO_PAGE_TYPE || PARAMS.type || typeFromPath();
@@ -90,13 +89,11 @@
     // ---------- document type helpers ----------
     var CELL_EXTS = ['xls', 'xlsx', 'xlsm', 'ods', 'csv'];
     var SLIDE_EXTS = ['ppt', 'pptx', 'odp', 'ppsx'];
-    var PDF_EXTS = ['pdf'];
 
     function detectDocumentType(ext) {
         ext = (ext || '').toLowerCase();
         if (CELL_EXTS.indexOf(ext) >= 0) return 'cell';
         if (SLIDE_EXTS.indexOf(ext) >= 0) return 'slide';
-        if (PDF_EXTS.indexOf(ext) >= 0) return 'pdf';
         return 'word';
     }
 
@@ -193,29 +190,19 @@
     // ---------- open a file ----------
     function openFile(file) {
         // file: { id?, name, ext, data: Uint8Array }
-        currentFile = { id: file.id || null, name: file.name, ext: (file.ext || '').toLowerCase() };
-        var ext = currentFile.ext;
+        var ext = (file.ext || '').toLowerCase();
+        if (ext === 'pdf') {
+            // PDF support was removed: editing/saving PDFs had serious issues.
+            setStatus('PDF is not supported. Please open docx/xlsx/pptx.', true);
+            setTimeout(function () { setStatus(''); }, 5000);
+            return;
+        }
+        currentFile = { id: file.id || null, name: file.name, ext: ext };
         document.title = currentFile.name;
         window.__ooDocExt = ext;
         hideHome();
 
         window.__x2tReadyPromise.then(function (mod) {
-            if (ext === 'pdf') {
-                // PDF: open raw bytes directly (no x2t bin conversion)
-                setStatus('Starting editor …');
-                // PDF: raw bytes go through the same bridge as the bin path;
-                // the pdfeditor shim's getEmpty returns them (raw PDF, not DOCY).
-                pendingBin = file.data;
-                window.__ooPendingDocBin = file.data;
-                createEditor(ext, currentFile.name);
-                waitForEditorApi(function (ed) {
-                    if (!emptyDocGotReal && ed.asc_openDocumentFromBytes) {
-                        ed.asc_openDocumentFromBytes(file.data);
-                    }
-                    setStatus('');
-                });
-                return;
-            }
             setStatus('Converting document …');
             var bin = x2tConvert(mod, file.data, ext, 'bin', 'open');
             pendingBin = bin;
@@ -267,10 +254,6 @@
 
             var openExt = (window.__ooDocExt || '').toLowerCase();
             var saveExt;
-            if (openExt === 'pdf') {
-                // PDF is saved as-is (no round-trip conversion); bin is the raw PDF
-                return persistToLibrary(bin.slice(), 'pdf');
-            }
             var supported = detectBinType(bin);
             if (supported) {
                 if (openExt && supported.indexOf(openExt) >= 0) {
@@ -329,8 +312,7 @@
     var OFFLINE_FORMAT_EXT = {
         65: 'docx', 67: 'odt', 68: 'rtf', 69: 'txt',
         257: 'xlsx', 259: 'ods', 260: 'csv',
-        129: 'pptx', 131: 'odp',
-        513: 'pdf'
+        129: 'pptx', 131: 'odp'
     };
     var OFFLINE_FORMAT_NAMES = {
         65: 'DOCX', 66: 'DOC', 67: 'ODT', 68: 'RTF', 69: 'TXT', 70: 'HTML', 73: 'EPUB',
@@ -342,113 +324,25 @@
 
     function handleOfflineDownload(msg) {
         var ext = OFFLINE_FORMAT_EXT[msg.format];
-        if (!ext) { setStatus('Download format #' + msg.format + ' not supported', true); return; }
+        if (!ext) {
+            var nm = OFFLINE_FORMAT_NAMES[msg.format] || ('format #' + msg.format);
+            setStatus('Download as ' + nm + ' is not supported', true);
+            setTimeout(function () { setStatus(''); }, 4000);
+            return;
+        }
         setStatus('Generating ' + ext + ' …');
         window.__x2tReadyPromise.then(function (mod) {
-            // PDF goes through the async render-bin path; other formats are sync x2t
-            var bytesPromise;
-            if (msg.format === 513) {
-                bytesPromise = x2tRenderBinToPdf(mod, new Uint8Array(msg.buffer));
-            } else {
-                var bin = new Uint8Array(msg.buffer);
-                bytesPromise = Promise.resolve(x2tConvert(mod, bin, 'bin', ext, 'download').slice());
-            }
-            return bytesPromise.then(function (bytes) {
-                // msg.title from asc_getDocumentName() already carries an extension
-                // (e.g. "untitled.docx"); strip it before appending the target format,
-                // otherwise Download As produces "untitled.docx.docx".
-                var base = (msg.title || 'document').replace(/\.[^.]+$/, '');
-                triggerDownload(bytes, base + '.' + ext);
-                setStatus('Exported ' + ext);
-                setTimeout(function () { setStatus(''); }, 2500);
-            });
+            var bin = new Uint8Array(msg.buffer);
+            var bytes = x2tConvert(mod, bin, 'bin', ext, 'download').slice();
+            // msg.title from asc_getDocumentName() already carries an extension
+            // (e.g. "untitled.docx"); strip it before appending the target format,
+            // otherwise Download As produces "untitled.docx.docx".
+            var base = (msg.title || 'document').replace(/\.[^.]+$/, '');
+            triggerDownload(bytes, base + '.' + ext);
+            setStatus('Exported ' + ext);
+            setTimeout(function () { setStatus(''); }, 2500);
         }).catch(function (e) {
             setStatus('Export failed: ' + (e && e.message || e), true);
-        });
-    }
-
-    // ---------- PDF render (render bin -> wasm PdfFile) ----------
-    var __fontsIndexPromise = null;
-    function getFontsIndex() {
-        if (!__fontsIndexPromise) {
-            __fontsIndexPromise = fetch('vendor/decoded-fonts/fonts-index.json')
-                .then(function (r) { return r.ok ? r.json() : {}; })
-                .catch(function () { return {}; });
-        }
-        return __fontsIndexPromise;
-    }
-    function parseRenderBinFonts(bin) {
-        var fonts = {};
-        var scanLen = Math.min(bin.length, 1024 * 1024);
-        var dv = bin.buffer && bin.byteOffset !== undefined
-            ? new DataView(bin.buffer, bin.byteOffset, bin.byteLength) : null;
-        if (!dv) return [];
-        for (var i = 0; i < scanLen - 3; i++) {
-            if (bin[i] === 0x29) {
-                var nChars = dv.getUint16(i + 1, true);
-                var nBytes = nChars * 2;
-                if (nBytes > 0 && nBytes < 400 && i + 3 + nBytes <= bin.length) {
-                    var name = '';
-                    for (var k = 0; k < nChars; k++) name += String.fromCharCode(dv.getUint16(i + 3 + k * 2, true));
-                    if (/^[\x20-\x7E]+$/.test(name) && /[a-zA-Z]/.test(name)) fonts[name] = 1;
-                    i += 2 + nBytes;
-                }
-            }
-        }
-        return Object.keys(fonts);
-    }
-    function x2tRenderBinToPdf(mod, renderBin) {
-        var FS = mod.FS;
-        try { FS.mkdir('/working'); } catch (e) {}
-        try { FS.mkdir('/working/fonts'); } catch (e) {}
-        try { FS.mkdir('/working/pdf_tmp'); } catch (e) {}
-        var fontsDir = '/working/fonts';
-        var needed = parseRenderBinFonts(renderBin);
-        return getFontsIndex().then(function (index) {
-            var fetched = {};
-            var chain = Promise.resolve();
-            needed.forEach(function (name) {
-                var entries = index[name.toLowerCase()];
-                if (!entries || !entries.length) return;
-                var entry = entries[0];
-                if (fetched[entry.file]) return;
-                fetched[entry.file] = 1;
-                var fext = entry.kind === 'otf' ? 'otf' : 'ttf';
-                chain = chain.then(function () {
-                    return fetch('vendor/decoded-fonts/' + entry.file + '.' + fext)
-                        .then(function (r) { return r.ok ? r.arrayBuffer() : null; })
-                        .then(function (buf) {
-                            if (!buf) return;
-                            var outName = name.replace(/[\s/\\]/g, '') + '.' + fext;
-                            FS.writeFile(fontsDir + '/' + outName, new Uint8Array(buf));
-                        }).catch(function () {});
-                });
-            });
-            return chain.then(function () {
-                if (!Object.keys(fetched).length) {
-                    var fallbacks = ['DroidSansFallbackFull.ttf', 'DejaVuSans.ttf',
-                        'DejaVuSans-Bold.ttf', 'DejaVuSerif.ttf',
-                        'DejaVuSansMono.ttf', 'LiberationMono-Regular.ttf',
-                        'LiberationMono-Bold.ttf'];
-                    var c2 = Promise.resolve();
-                    fallbacks.forEach(function (f) {
-                        c2 = c2.then(function () {
-                            return fetch('vendor/pdf-fonts/' + f)
-                                .then(function (r) { return r.ok ? r.arrayBuffer() : null; })
-                                .then(function (buf) {
-                                    if (buf) FS.writeFile(fontsDir + '/' + f, new Uint8Array(buf));
-                                }).catch(function () {});
-                        });
-                    });
-                    return c2;
-                }
-            }).then(function () {
-                var ret = mod.ccall('x2t_render_bin_to_pdf', 'number',
-                    ['array', 'number', 'string', 'string'],
-                    [renderBin, renderBin.length, fontsDir + '/', '/working/pdf_tmp/out.pdf']);
-                if (ret !== 0) throw new Error('PDF conversion failed ret=' + ret);
-                return FS.readFile('/working/pdf_tmp/out.pdf').slice();
-            });
         });
     }
 
@@ -466,7 +360,7 @@
                 var item = document.createElement('div');
                 item.className = 'file-item';
                 item.setAttribute('data-id', f.id);
-                var icon = { docx: '📄', xlsx: '📊', pptx: '📽', pdf: '📕' }[f.ext] || '📄';
+                var icon = { docx: '📄', xlsx: '📊', pptx: '📽' }[f.ext] || '📄';
                 item.innerHTML =
                     '<span class="file-icon">' + icon + '</span>' +
                     '<span class="file-name"></span>' +
@@ -507,11 +401,17 @@
     }
 
     // ---------- home screen / upload ----------
+    function setBackHomeVisible(visible) {
+        var btn = document.getElementById('back-home');
+        if (btn) btn.style.display = visible ? 'inline-flex' : 'none';
+    }
     function showHome() {
         var home = document.getElementById('home');
         if (home) home.style.display = '';
         var ed = document.getElementById('editor');
         if (ed) ed.style.display = 'none';
+        setBackHomeVisible(false);
+        document.title = 'Office Web';
         refreshLibrary();
     }
     function hideHome() {
@@ -519,6 +419,26 @@
         if (home) home.style.display = 'none';
         var ed = document.getElementById('editor');
         if (ed) ed.style.display = '';
+        setBackHomeVisible(true);
+    }
+
+    // Back-to-home: return to the file library without reloading the page.
+    // The editor iframe is torn down; unsaved changes are lost (the status
+    // bar tells the user to save first if the document is dirty).
+    function backToHome() {
+        if (docEditor && typeof docEditor.destroyEditor === 'function') {
+            try { docEditor.destroyEditor(); } catch (e) {}
+        }
+        docEditor = null;
+        var ed = document.getElementById('editor');
+        if (ed) ed.innerHTML = '';
+        pendingBin = null;
+        window.__ooPendingDocBin = null;
+        documentReady = false;
+        emptyDocGotReal = false;
+        currentFile = null;
+        window.__ooDocExt = '';
+        showHome();
     }
 
     function handleFiles(fileList) {
@@ -534,7 +454,7 @@
 
     function createNew(ext) {
         ext = ext || PAGE_TYPE || 'docx';
-        var emptyUrl = { docx: 'assets/empty.docx', xlsx: 'assets/empty.xlsx', pptx: 'assets/empty.pptx', pdf: 'assets/empty.pdf' }[ext];
+        var emptyUrl = { docx: 'assets/empty.docx', xlsx: 'assets/empty.xlsx', pptx: 'assets/empty.pptx' }[ext];
         if (!emptyUrl) return;
         fetch(emptyUrl).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
             var name = 'untitled.' + ext;
@@ -590,7 +510,11 @@
             uploadBtn.addEventListener('click', function () { uploadInput.click(); });
             uploadInput.addEventListener('change', function () { handleFiles(uploadInput.files); });
         }
-        // per-type "New" buttons (data-new="docx|xlsx|pptx|pdf")
+        // back-to-home button
+        var backHomeBtn = document.getElementById('back-home');
+        if (backHomeBtn) backHomeBtn.addEventListener('click', backToHome);
+
+        // per-type "New" buttons (data-new="docx|xlsx|pptx")
         var newActions = document.getElementById('new-actions');
         if (newActions) {
             newActions.addEventListener('click', function (e) {
