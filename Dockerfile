@@ -12,6 +12,7 @@
 #   http://localhost:8080/docx.html   (document entry)
 #   http://localhost:8080/xlsx.html   (spreadsheet entry)
 #   http://localhost:8080/pptx.html   (presentation entry)
+#   http://localhost:8080/pdf.html    (PDF entry)
 
 FROM python:3.11-slim
 

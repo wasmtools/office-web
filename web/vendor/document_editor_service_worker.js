@@ -7,7 +7,7 @@ if (pathnameParts.length > 1 && pathnameParts[pathnameParts.length - 2]) {
 	g_version = pathnameParts[pathnameParts.length - 2];
 }
 
-const g_buildVersion = "2026-08-18-1";
+const g_buildVersion = "2026-08-21-1";
 const g_cacheNamePrefix = 'document_editor_static_';
 const g_cacheName = g_cacheNamePrefix + g_version + '_' + g_buildVersion;
 const g_cacheablePrefixes = [

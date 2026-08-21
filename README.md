@@ -6,7 +6,8 @@ All format conversion runs client-side in a self-compiled `x2t.wasm`.
 
 ## Features
 
-- **Open / edit / save** `docx`, `xlsx`, `pptx` in the browser
+- **Open / edit / save** `docx`, `xlsx`, `pptx` and `pdf` (view + annotate)
+  in the browser
 - **Fully client-side** conversion via a self-compiled WebAssembly build of the
   ONLYOFFICE `x2t` converter
 - **No server document storage** — files live in your browser (IndexedDB);
@@ -16,6 +17,7 @@ All format conversion runs client-side in a self-compiled `x2t.wasm`.
   - `/docx.html` — document
   - `/xlsx.html` — spreadsheet
   - `/pptx.html` — presentation
+  - `/pdf.html` — PDF
 
 ## Quick start
 
@@ -36,6 +38,17 @@ docker run -d -p 8080:8080 office-web
 
 The Docker build pre-compresses assets to brotli.
 
+### Test
+
+An end-to-end Playwright test covers the PDF open → annotate → save → merge →
+round-trip path (plus a docx save regression):
+
+```bash
+python3 server.py --port 8099 --root web &   # in one shell
+pip install playwright && playwright install chromium
+python3 scripts/e2e-pdf-test.py              # against http://localhost:8099
+```
+
 ### Pre-built image
 
 A container image is published to GitHub Container Registry by CI:
@@ -49,7 +62,17 @@ ghcr.io/wasmtools/office-web:latest
 ```
 file bytes ──▶ x2t.wasm (docx|xlsx|pptx → bin) ──▶ ONLYOFFICE editor iframe
 editor bin ──▶ x2t.wasm (bin → docx|xlsx|pptx) ──▶ IndexedDB / download
+raw PDF    ──▶ pdfeditor (native format, no bin round-trip)
+PDF save   ──▶ x2t.wasm (base PDF + compiled changes → merged PDF)
 ```
+
+- **PDF editing** is two-stage, mirroring the Document Server's
+  collaborative save: `file.getFileBinary()` returns the original base PDF,
+  `DocumentRenderer.Save()` returns the compiled changes stream
+  (annotations, forms, page edits). The self-compiled `x2t.wasm` merges the
+  two (`main1` + `<m_bFromChanges>true</m_bFromChanges>`, the same code path
+  Document Server uses in `CPdfFile::AddToPdfFromBinary`). With no edits the
+  changes stream is empty and the base PDF is saved as-is.
 
 - The editor is the official ONLYOFFICE Document Server 9.4 frontend running
   in **offline mode** (`document.url = '_offline_'`), with a small
@@ -77,6 +100,8 @@ office-web/
 │   └── vendor/              # ONLYOFFICE frontend + x2t.wasm + fonts
 ├── server.py                # minimal static server (brotli/gzip)
 ├── precompress.py           # build-time brotli pre-compression
+├── scripts/e2e-pdf-test.py  # Playwright end-to-end test
+├── testfiles/               # sample documents for the e2e test
 ├── Dockerfile
 └── .github/workflows/build.yaml
 ```
@@ -93,8 +118,10 @@ office-web/
 - **HTTP caching**: the server sends `Cache-Control: public, max-age=2592000`
   (30 days) for `vendor/` and `assets/` files and `no-cache` (revalidate) for
   app files and pages. When serving behind your own proxy, mirror this policy.
-- **PDF** support was removed: PDF editing and saving had serious issues.
-  PDF files are rejected with a message at open time.
+- **PDF**: open / annotate / save works offline. Only saving back to PDF is
+  supported (Download As to other formats is not possible offline: pdf→bin
+  parsing is not in x2t, and image export needs server rendering). Printing
+  is disabled for the same reason.
 
 ## License
 

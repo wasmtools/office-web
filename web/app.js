@@ -6,6 +6,8 @@
  *
  *   open : file bytes -> x2t (docx|xlsx|pptx -> bin) -> editor.openDocument({buffer})
  *   save : editor bin -> x2t (bin -> docx|xlsx|pptx) -> download / IndexedDB
+ *   pdf  : raw PDF bytes -> pdfeditor (native format); save is two-stage —
+ *          base PDF + compiled changes stream merged by x2t (m_bFromChanges)
  *
  * Files are persisted in IndexedDB (see store.js) so they survive reloads.
  */
@@ -14,7 +16,7 @@
 
     // Bump on every deploy: keys the Cache API entry for x2t.wasm, so users
     // re-download the converter exactly once per release.
-    var BUILD_VERSION = '1.1.0';
+    var BUILD_VERSION = '1.2.0';
     window.__OO_BUILD_VERSION = BUILD_VERSION;
 
     // ---------- config from URL ----------
@@ -24,7 +26,7 @@
     // Determine the entry type. Priority: explicit global (?set by an embedder),
     // ?type= param, then the page filename (docx.html -> 'docx', etc.).
     function typeFromPath() {
-        var m = /\/(docx|xlsx|pptx)\.html$/.exec(window.location.pathname);
+        var m = /\/(docx|xlsx|pptx|pdf)\.html$/.exec(window.location.pathname);
         return m ? m[1] : '';
     }
     var PAGE_TYPE = window.__OO_PAGE_TYPE || PARAMS.type || typeFromPath();
@@ -98,14 +100,69 @@
         return mod.FS.readFile('/working/' + outName);
     }
 
+    // ---------- PDF save: base PDF + compiled changes -> merged PDF ----------
+    // The PDF editor's save is two-stage (isomorphic to the Document Server's
+    // collaborative save):
+    //   base    = the original PDF bytes as opened
+    //             (shim __ooGetFileData -> DocumentRenderer.file.getFileBinary())
+    //   changes = incremental serialization of the edits
+    //             (shim __ooGetPdfChanges -> DocumentRenderer.Save(),
+    //             "%PDF"+command stream; only a 26-byte header when empty)
+    // Officially the server-side C++ CPdfFile::AddToPdfFromBinary merges
+    // changes into base; here we reuse the same code from the self-compiled
+    // x2t.wasm: main1 + <m_bFromChanges>true</m_bFromChanges>, with the
+    // changes in a changes/ directory next to the source file (core
+    // X2tConverter/src/lib/pdf_image.h fromCrossPlatform -> applyChangesPdf
+    // -> applyCompiledChangesPdf convention).
+    // With no edits (changes null or <= 26-byte header) the base is returned
+    // directly, skipping wasm.
+    function mergePdfChanges(base, changes) {
+        var EMPTY_CHANGES_LEN = 26;   // Save() with no edits: "%PDF"+length header only
+        if (!changes || changes.length <= EMPTY_CHANGES_LEN) return Promise.resolve(base);
+        return window.__x2tReadyPromise.then(function (mod) {
+            var FS = mod.FS;
+            try { FS.mkdir('/working'); } catch (e) {}
+            try { FS.mkdir('/working/changes'); } catch (e) {}
+            try { FS.mkdir('/working/fonts'); } catch (e) {}
+            try { FS.mkdir('/working/themes'); } catch (e) {}
+            // clean leftovers from a previous round (save may fire back-to-back)
+            ['/working/changes'].forEach(function (dir) {
+                try {
+                    FS.readdir(dir).filter(function (n) { return n !== '.' && n !== '..'; })
+                        .forEach(function (e) { try { FS.unlink(dir + '/' + e); } catch (_) {} });
+                } catch (_) {}
+            });
+            ['src.pdf', 'out.pdf', 'params.xml'].forEach(function (f) {
+                try { FS.unlink('/working/' + f); } catch (_) {}
+            });
+            fsWriteFile(mod, '/working/src.pdf', base);
+            fsWriteFile(mod, '/working/changes/changes0.bin', changes);
+            var xml = '<?xml version="1.0" encoding="utf-8"?>' +
+                '<TaskQueueDataConvert xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">' +
+                '<m_sFontDir>/working/fonts/</m_sFontDir>' +
+                '<m_sThemeDir>/working/themes</m_sThemeDir>' +
+                '<m_sFileFrom>/working/src.pdf</m_sFileFrom>' +
+                '<m_sFileTo>/working/out.pdf</m_sFileTo>' +
+                '<m_bIsNoBase64>true</m_bIsNoBase64>' +
+                '<m_bFromChanges>true</m_bFromChanges>' +
+                '</TaskQueueDataConvert>';
+            FS.writeFile('/working/params.xml', xml);
+            var ret = mod.ccall('main1', 'number', ['string'], ['/working/params.xml']);
+            if (ret !== 0) throw new Error('PDF changes merge failed ret=' + ret);
+            return FS.readFile('/working/out.pdf');
+        });
+    }
+
     // ---------- document type helpers ----------
     var CELL_EXTS = ['xls', 'xlsx', 'xlsm', 'ods', 'csv'];
     var SLIDE_EXTS = ['ppt', 'pptx', 'odp', 'ppsx'];
+    var PDF_EXTS = ['pdf'];
 
     function detectDocumentType(ext) {
         ext = (ext || '').toLowerCase();
         if (CELL_EXTS.indexOf(ext) >= 0) return 'cell';
         if (SLIDE_EXTS.indexOf(ext) >= 0) return 'slide';
+        if (PDF_EXTS.indexOf(ext) >= 0) return 'pdf';
         return 'word';
     }
 
@@ -143,6 +200,11 @@
                 } else if (docType === 'slide') {
                     var ldS = ed.WordControl && ed.WordControl.m_oLogicDocument;
                     ready = !!(ldS && ldS.Slides && ldS.Slides.length > 0);
+                } else if (docType === 'pdf') {
+                    // PDFEditorApi: the document model lives in
+                    // DocumentRenderer.file; pages present => rendered.
+                    var file = ed.DocumentRenderer && ed.DocumentRenderer.file;
+                    ready = !!(file && file.pages && file.pages.length > 0);
                 } else {
                     var ld = ed.WordControl && ed.WordControl.m_oLogicDocument;
                     ready = !!(ld && ld.Pages && ld.Pages.length > 0);
@@ -161,18 +223,27 @@
 
     function createEditor(fileExt, title) {
         var docType = detectDocumentType(fileExt);
+        var document = {
+            fileType: fileExt,
+            key: 'doc-' + Date.now(),
+            title: title,
+            url: '_offline_',
+            permissions: { edit: true, download: true, print: true, copy: true }
+        };
+        if (docType === 'pdf') {
+            // Explicit isForm: otherwise api.js first sends a checkParams
+            // message making pdfeditor probe the "extended PDF" via the
+            // downloadfile endpoint, which does not exist offline (wasted
+            // round-trip). isForm=false puts &isForm=false on the iframe
+            // URL and pdfeditor goes straight to startApp.
+            document.isForm = false;
+        }
         docEditor = new DocsAPI.DocEditor('editor', {
             type: 'desktop',
             width: '100%',
             height: '100%',
             documentType: docType,
-            document: {
-                fileType: fileExt,
-                key: 'doc-' + Date.now(),
-                title: title,
-                url: '_offline_',
-                permissions: { edit: true, download: true, print: true, copy: true }
-            },
+            document: document,
             editorConfig: {
                 mode: 'edit',
                 lang: 'en',
@@ -203,16 +274,31 @@
     function openFile(file) {
         // file: { id?, name, ext, data: Uint8Array }
         var ext = (file.ext || '').toLowerCase();
-        if (ext === 'pdf') {
-            // PDF support was removed: editing/saving PDFs had serious issues.
-            setStatus('PDF is not supported. Please open docx/xlsx/pptx.', true);
-            setTimeout(function () { setStatus(''); }, 5000);
-            return;
-        }
         currentFile = { id: file.id || null, name: file.name, ext: ext };
         document.title = currentFile.name;
         window.__ooDocExt = ext;
         hideHome();
+
+        var docType = detectDocumentType(ext);
+        if (docType === 'pdf') {
+            // PDF skips the x2t bin round-trip: pdfeditor is a native-format
+            // editor (sdkjs onEndLoadFile validates raw PDF bytes for
+            // isPdfEditor(), not DOCY/XLSY/PPTY bin). The raw bytes go on
+            // the bridge; the pdfeditor offline-shim's getEmpty() picks them
+            // up during the one-shot load.
+            // Note: opening does not wait for x2t.wasm either (it loads in
+            // the background at boot; by the time a save merge needs it,
+            // __x2tReadyPromise is ready or nearly so), saving the 36MB
+            // wasm wait on the open path.
+            window.__ooPendingDocBin = file.data;
+            setStatus('Starting editor …');
+            createEditor(ext, currentFile.name);
+            waitDocumentRendered(docType);
+            if (window.OOEditorState && window.OOEditorState._start) {
+                window.OOEditorState._start(ext, docType, currentFile.name);
+            }
+            return;
+        }
 
         window.__x2tReadyPromise.then(function (mod) {
             setStatus('Converting document …');
@@ -220,7 +306,6 @@
             pendingBin = bin;
             window.__ooPendingDocBin = bin;
             setStatus('Starting editor …');
-            var docType = detectDocumentType(ext);
             createEditor(ext, currentFile.name);
             waitDocumentRendered(docType);
             if (window.OOEditorState && window.OOEditorState._start) {
@@ -260,11 +345,35 @@
             return Promise.resolve(false);
         }
         setStatus('Saving …');
+        var openExt = (window.__ooDocExt || '').toLowerCase();
+        if (openExt === 'pdf') {
+            // Two-stage PDF save: bin = base PDF (__ooGetFileData), the
+            // changes stream comes from __ooGetPdfChanges
+            // (DocumentRenderer.Save()); x2t merges them into the final PDF.
+            // With no edits the changes stream is a 26-byte header and
+            // mergePdfChanges returns the base as-is.
+            var base = frame.contentWindow.__ooGetFileData();
+            if (!base || !base.length) {
+                setStatus('Save failed: No document data', true);
+                return Promise.resolve(false);
+            }
+            var changes = frame.contentWindow.__ooGetPdfChanges
+                ? frame.contentWindow.__ooGetPdfChanges() : null;
+            return mergePdfChanges(base, changes).then(function (merged) {
+                return persistToLibrary(merged.slice(), 'pdf');
+            }).then(function () {
+                setStatus('Saved ' + new Date().toLocaleTimeString());
+                setTimeout(function () { setStatus(''); }, 3000);
+                return true;
+            }).catch(function (e) {
+                setStatus('Save failed: ' + (e && e.message || e), true);
+                return false;
+            });
+        }
         return window.__x2tReadyPromise.then(function (mod) {
             var bin = frame.contentWindow.__ooGetFileData();
             if (!bin || !bin.length) throw new Error('No document data');
 
-            var openExt = (window.__ooDocExt || '').toLowerCase();
             var saveExt;
             var supported = detectBinType(bin);
             if (supported) {
@@ -331,7 +440,8 @@
     var OFFLINE_FORMAT_EXT = {
         65: 'docx', 67: 'odt', 68: 'rtf', 69: 'txt',
         257: 'xlsx', 259: 'ods', 260: 'csv',
-        129: 'pptx', 131: 'odp'
+        129: 'pptx', 131: 'odp',
+        513: 'pdf'
     };
     var OFFLINE_FORMAT_NAMES = {
         65: 'DOCX', 66: 'DOC', 67: 'ODT', 68: 'RTF', 69: 'TXT', 70: 'HTML', 73: 'EPUB',
@@ -350,9 +460,20 @@
             return;
         }
         setStatus('Generating ' + ext + ' …');
-        window.__x2tReadyPromise.then(function (mod) {
-            var bin = new Uint8Array(msg.buffer);
-            var bytes = x2tConvert(mod, bin, 'bin', ext, 'download').slice();
+        var bytesPromise;
+        if (msg.format === 513 && msg.pdf) {
+            // PDF editor "Download As PDF": base + compiled changes stream
+            // merged by x2t (same path as saving).
+            bytesPromise = mergePdfChanges(new Uint8Array(msg.buffer),
+                msg.changes ? new Uint8Array(msg.changes) : null)
+                .then(function (merged) { return merged.slice(); });
+        } else {
+            bytesPromise = window.__x2tReadyPromise.then(function (mod) {
+                var bin = new Uint8Array(msg.buffer);
+                return x2tConvert(mod, bin, 'bin', ext, 'download').slice();
+            });
+        }
+        bytesPromise.then(function (bytes) {
             // msg.title from asc_getDocumentName() already carries an extension
             // (e.g. "untitled.docx"); strip it before appending the target format,
             // otherwise Download As produces "untitled.docx.docx".
@@ -385,7 +506,7 @@
                 var item = document.createElement('div');
                 item.className = 'file-item';
                 item.setAttribute('data-id', f.id);
-                var icon = { docx: '📄', xlsx: '📊', pptx: '📽' }[f.ext] || '📄';
+                var icon = { docx: '📄', xlsx: '📊', pptx: '📽', pdf: '📕' }[f.ext] || '📄';
                 item.innerHTML =
                     '<span class="file-icon">' + icon + '</span>' +
                     '<span class="file-name"></span>' +
@@ -429,7 +550,7 @@
         var dot = input.lastIndexOf('.');
         var base = dot > 0 ? input.slice(0, dot) : input;
         var ext = dot > 0 ? input.slice(dot + 1).toLowerCase() : f.ext;
-        var writable = { docx: 1, xlsx: 1, pptx: 1, doc: 1, xls: 1, ppt: 1, odt: 1, ods: 1, odp: 1, csv: 1, rtf: 1, txt: 1 };
+        var writable = { docx: 1, xlsx: 1, pptx: 1, pdf: 1, doc: 1, xls: 1, ppt: 1, odt: 1, ods: 1, odp: 1, csv: 1, rtf: 1, txt: 1 };
         if (!writable[ext]) ext = f.ext;
         window.FileStore.rename(f.id, base + '.' + ext, ext).then(function () {
             setStatus('Renamed to ' + base + '.' + ext);
@@ -536,7 +657,7 @@
 
     function createNew(ext) {
         ext = ext || PAGE_TYPE || 'docx';
-        var emptyUrl = { docx: 'assets/empty.docx', xlsx: 'assets/empty.xlsx', pptx: 'assets/empty.pptx' }[ext];
+        var emptyUrl = { docx: 'assets/empty.docx', xlsx: 'assets/empty.xlsx', pptx: 'assets/empty.pptx', pdf: 'assets/empty.pdf' }[ext];
         if (!emptyUrl) return;
         fetch(emptyUrl).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
             var name = 'untitled.' + ext;
