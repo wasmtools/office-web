@@ -1,6 +1,8 @@
 # brotli pre-compressed assets (regenerated at build time by precompress.py)
 *.br
 
+/refs
+
 # decoded font pool (regenerated at build time by extract-fonts.py)
 web/vendor/decoded-fonts/
 
