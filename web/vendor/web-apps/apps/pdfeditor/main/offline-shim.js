@@ -303,14 +303,18 @@
 
     // ---- 9) watchdog for a stuck "Loading Image"/"Loading data" mask ----
     // For some PDFs the async load indicator (a sync_StartAction that never
-    // gets its matching sync_EndAction — a race in the editor's image/font
-    // loading) never clears, blocking the whole UI even though the document
-    // model is fully loaded. The proper way to clear it is to deliver the
-    // missing sync_EndAction, which hides the mask and re-enables keyboard
-    // input through the normal path. If the mask is still visible 25 s after
-    // the pages are present, fire that end-action so the editor is usable.
+    // gets its matching sync_EndAction) never clears, blocking the whole UI
+    // even though the document model, images and fonts are already loaded.
+    // This happens offline when the load-completion path returns early
+    // without delivering the end-action (e.g. the PDF edit-page flow), or
+    // when a referenced font/image simply cannot be resolved. Rather than
+    // waiting for something that will never arrive, we detect that nothing
+    // is actually still loading and deliver the missing sync_EndAction,
+    // which hides the mask and re-enables keyboard input through the
+    // editor's own code path.
     (function () {
         var stuckSince = 0;
+        var GRACE_MS = 2000;   // short grace before concluding the load is orphaned
         // Mask title -> the BlockInteraction action id it belongs to
         // (see pdfeditor Main.js onLongActionBegin switch / locale strings).
         function actionIdFromTitle(t) {
@@ -319,6 +323,24 @@
             if (t.indexOf('loading image') >= 0) return 5;    // LoadImage
             if (t.indexOf('loading data') >= 0) return 4;     // LoadFont / LoadDocumentFonts
             return 5;                                          // default: LoadImage
+        }
+        // True if the image/font loaders still have real work in flight.
+        function anythingStillLoading(ed) {
+            try {
+                var il = ed.ImageLoader;
+                if (il && il.map_image_index) {
+                    var idx = il.map_image_index;
+                    for (var k in idx) {
+                        // Status 0 = Loading; anything else is done/failed.
+                        if (idx[k] && idx[k].Status === 0) return true;
+                    }
+                }
+            } catch (e) {}
+            try {
+                var fl = ed.FontLoader || (window.AscCommon && window.AscCommon.g_font_loader);
+                if (fl && fl.fonts_loading && fl.fonts_loading.length > 0) return true;
+            } catch (e) {}
+            return false;
         }
         setInterval(function () {
             try {
@@ -333,8 +355,10 @@
                 if (title.indexOf('loading image') < 0 && title.indexOf('loading data') < 0) {
                     stuckSince = 0; return;
                 }
+                // Something is genuinely still loading — give it time.
+                if (anythingStillLoading(ed)) { stuckSince = 0; return; }
                 if (!stuckSince) { stuckSince = Date.now(); return; }
-                if (Date.now() - stuckSince > 25000) {
+                if (Date.now() - stuckSince > GRACE_MS) {
                     // Deliver the missing end-action (counter clamps at 0, so
                     // an extra end for an already-finished action is harmless).
                     // type 1 = c_oAscAsyncActionType.BlockInteraction.
@@ -344,7 +368,7 @@
                     stuckSince = 0;
                 }
             } catch (e) { stuckSince = 0; }
-        }, 1000);
+        }, 500);
     })();
 
     // ---- 10) block printing (no offline server render path; asc_Print hangs) ----
