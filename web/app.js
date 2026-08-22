@@ -16,7 +16,7 @@
 
     // Bump on every deploy: keys the Cache API entry for x2t.wasm, so users
     // re-download the converter exactly once per release.
-    var BUILD_VERSION = '1.2.1';
+    var BUILD_VERSION = '1.2.2';
     window.__OO_BUILD_VERSION = BUILD_VERSION;
 
     // ---------- config from URL ----------
@@ -116,17 +116,41 @@
     // -> applyCompiledChangesPdf convention).
     // With no edits (changes null or <= 26-byte header) the base is returned
     // directly, skipping wasm.
+    // Fallback fonts for the PDF merge. Text inserted in PDF edit mode may
+    // reference glyphs missing from the page's subset fonts; the recompiled
+    // x2t (GetFallbackFontForChar) resolves them from this font dir and
+    // embeds the needed glyphs. Fetched lazily (only when merging real
+    // changes) and cached in memory. DroidSansFallbackFull covers CJK,
+    // DejaVuSans covers Latin/other.
+    var PDF_MERGE_FONTS = [
+        { url: 'vendor/pdf-fonts/DroidSansFallbackFull.ttf', name: 'DroidSansFallbackFull.ttf' },
+        { url: 'vendor/pdf-fonts/DejaVuSans.ttf', name: 'DejaVuSans.ttf' }
+    ];
+    var __pdfMergeFontsPromise = null;
+    function loadPdfMergeFonts() {
+        if (__pdfMergeFontsPromise) return __pdfMergeFontsPromise;
+        __pdfMergeFontsPromise = Promise.all(PDF_MERGE_FONTS.map(function (f) {
+            return fetch(f.url).then(function (r) {
+                if (!r.ok) return null;
+                return r.arrayBuffer().then(function (buf) { return { name: f.name, data: new Uint8Array(buf) }; });
+            }).catch(function () { return null; });
+        })).then(function (list) { return list.filter(Boolean); });
+        return __pdfMergeFontsPromise;
+    }
+
     function mergePdfChanges(base, changes) {
         var EMPTY_CHANGES_LEN = 26;   // Save() with no edits: "%PDF"+length header only
         if (!changes || changes.length <= EMPTY_CHANGES_LEN) return Promise.resolve(base);
-        return window.__x2tReadyPromise.then(function (mod) {
+        return Promise.all([window.__x2tReadyPromise, loadPdfMergeFonts()]).then(function (ready) {
+            var mod = ready[0];
+            var fonts = ready[1];
             var FS = mod.FS;
             try { FS.mkdir('/working'); } catch (e) {}
             try { FS.mkdir('/working/changes'); } catch (e) {}
             try { FS.mkdir('/working/fonts'); } catch (e) {}
             try { FS.mkdir('/working/themes'); } catch (e) {}
             // clean leftovers from a previous round (save may fire back-to-back)
-            ['/working/changes'].forEach(function (dir) {
+            ['/working/changes', '/working/fonts'].forEach(function (dir) {
                 try {
                     FS.readdir(dir).filter(function (n) { return n !== '.' && n !== '..'; })
                         .forEach(function (e) { try { FS.unlink(dir + '/' + e); } catch (_) {} });
@@ -135,6 +159,9 @@
             ['src.pdf', 'out.pdf', 'params.xml'].forEach(function (f) {
                 try { FS.unlink('/working/' + f); } catch (_) {}
             });
+            // supply fallback fonts so the merge can embed glyphs missing from
+            // the page's subset fonts (inserted text)
+            fonts.forEach(function (f) { fsWriteFile(mod, '/working/fonts/' + f.name, f.data); });
             fsWriteFile(mod, '/working/src.pdf', base);
             fsWriteFile(mod, '/working/changes/changes0.bin', changes);
             var xml = '<?xml version="1.0" encoding="utf-8"?>' +
