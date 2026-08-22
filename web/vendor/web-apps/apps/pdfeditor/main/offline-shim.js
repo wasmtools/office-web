@@ -301,7 +301,53 @@
         }, 100);
     })();
 
-    // ---- 9) block printing (no offline server render path; asc_Print hangs) ----
+    // ---- 9) watchdog for a stuck "Loading Image"/"Loading data" mask ----
+    // For some PDFs the async load indicator (a sync_StartAction that never
+    // gets its matching sync_EndAction — a race in the editor's image/font
+    // loading) never clears, blocking the whole UI even though the document
+    // model is fully loaded. The proper way to clear it is to deliver the
+    // missing sync_EndAction, which hides the mask and re-enables keyboard
+    // input through the normal path. If the mask is still visible 25 s after
+    // the pages are present, fire that end-action so the editor is usable.
+    (function () {
+        var stuckSince = 0;
+        // Mask title -> the BlockInteraction action id it belongs to
+        // (see pdfeditor Main.js onLongActionBegin switch / locale strings).
+        function actionIdFromTitle(t) {
+            t = (t || '').toLowerCase();
+            if (t.indexOf('loading images') >= 0) return 3;   // LoadDocumentImages
+            if (t.indexOf('loading image') >= 0) return 5;    // LoadImage
+            if (t.indexOf('loading data') >= 0) return 4;     // LoadFont / LoadDocumentFonts
+            return 5;                                          // default: LoadImage
+        }
+        setInterval(function () {
+            try {
+                var ed = (window.Asc && window.Asc.editor) || window.editor;
+                var file = ed && ed.DocumentRenderer && ed.DocumentRenderer.file;
+                var docReady = !!(file && file.pages && file.pages.length > 0);
+                if (!docReady) { stuckSince = 0; return; }
+                var titleEl = document.querySelector('.asc-loadmask-title');
+                var title = titleEl ? (titleEl.textContent || '').toLowerCase() : '';
+                // Only the "Loading image(s)/data" family hangs this way; do
+                // not interfere with legitimately slow Save/Download masks.
+                if (title.indexOf('loading image') < 0 && title.indexOf('loading data') < 0) {
+                    stuckSince = 0; return;
+                }
+                if (!stuckSince) { stuckSince = Date.now(); return; }
+                if (Date.now() - stuckSince > 25000) {
+                    // Deliver the missing end-action (counter clamps at 0, so
+                    // an extra end for an already-finished action is harmless).
+                    // type 1 = c_oAscAsyncActionType.BlockInteraction.
+                    try {
+                        ed.sync_EndAction(1, actionIdFromTitle(title));
+                    } catch (e) {}
+                    stuckSince = 0;
+                }
+            } catch (e) { stuckSince = 0; }
+        }, 1000);
+    })();
+
+    // ---- 10) block printing (no offline server render path; asc_Print hangs) ----
     (function () {
         var applied = false;
         function patchPrint() {

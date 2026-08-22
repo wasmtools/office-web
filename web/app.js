@@ -16,7 +16,7 @@
 
     // Bump on every deploy: keys the Cache API entry for x2t.wasm, so users
     // re-download the converter exactly once per release.
-    var BUILD_VERSION = '1.2.0';
+    var BUILD_VERSION = '1.2.1';
     window.__OO_BUILD_VERSION = BUILD_VERSION;
 
     // ---------- config from URL ----------
@@ -360,14 +360,24 @@
             var changes = frame.contentWindow.__ooGetPdfChanges
                 ? frame.contentWindow.__ooGetPdfChanges() : null;
             return mergePdfChanges(base, changes).then(function (merged) {
-                return persistToLibrary(merged.slice(), 'pdf');
-            }).then(function () {
-                setStatus('Saved ' + new Date().toLocaleTimeString());
-                setTimeout(function () { setStatus(''); }, 3000);
-                return true;
+                return persistToLibrary(merged.slice(), 'pdf').then(function () {
+                    setStatus('Saved ' + new Date().toLocaleTimeString());
+                    setTimeout(function () { setStatus(''); }, 3000);
+                    return true;
+                });
             }).catch(function (e) {
-                setStatus('Save failed: ' + (e && e.message || e), true);
-                return false;
+                // The x2t merge could not re-process this particular PDF: its
+                // C++ (xpdf) parser is stricter than the in-editor one, so for
+                // some files it cannot re-open the base to apply the changes
+                // (x2t returns 80 / AVS_FILEUTILS_ERROR_CONVERT and writes no
+                // output). Fall back to persisting the untouched base PDF so
+                // the document is never lost, and tell the user plainly that
+                // the latest edits could not be merged into this file.
+                return persistToLibrary(base.slice(), 'pdf').then(function () {
+                    setStatus('Saved the original PDF — this file could not be re-merged, so the latest edits are not included (' + (e && e.message || e) + ')', true);
+                    setTimeout(function () { setStatus(''); }, 10000);
+                    return true;
+                });
             });
         }
         return window.__x2tReadyPromise.then(function (mod) {
@@ -461,12 +471,17 @@
         }
         setStatus('Generating ' + ext + ' …');
         var bytesPromise;
+        var pdfFallback = false;
         if (msg.format === 513 && msg.pdf) {
             // PDF editor "Download As PDF": base + compiled changes stream
-            // merged by x2t (same path as saving).
-            bytesPromise = mergePdfChanges(new Uint8Array(msg.buffer),
+            // merged by x2t (same path as saving). If the merge cannot
+            // re-process this PDF (see doSave), download the untouched base
+            // rather than failing outright.
+            var pdfBase = new Uint8Array(msg.buffer);
+            bytesPromise = mergePdfChanges(pdfBase,
                 msg.changes ? new Uint8Array(msg.changes) : null)
-                .then(function (merged) { return merged.slice(); });
+                .then(function (merged) { return merged.slice(); })
+                .catch(function () { pdfFallback = true; return pdfBase.slice(); });
         } else {
             bytesPromise = window.__x2tReadyPromise.then(function (mod) {
                 var bin = new Uint8Array(msg.buffer);
@@ -479,8 +494,13 @@
             // otherwise Download As produces "untitled.docx.docx".
             var base = (msg.title || 'document').replace(/\.[^.]+$/, '');
             triggerDownload(bytes, base + '.' + ext);
-            setStatus('Exported ' + ext);
-            setTimeout(function () { setStatus(''); }, 2500);
+            if (pdfFallback) {
+                setStatus('Merge failed — downloaded the original PDF without the latest edits', true);
+                setTimeout(function () { setStatus(''); }, 8000);
+            } else {
+                setStatus('Exported ' + ext);
+                setTimeout(function () { setStatus(''); }, 2500);
+            }
         }).catch(function (e) {
             setStatus('Export failed: ' + (e && e.message || e), true);
         });
